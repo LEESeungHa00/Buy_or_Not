@@ -238,13 +238,13 @@ else:
         st.warning("분석을 위해 최소 하나 이상의 HS코드를 선택해야 합니다.")
     else:
         # 기간 선택 슬라이더
-        min_date = pd.to_datetime('2020-01-01')
-        max_date = pd.to_datetime(datetime.now())
+        min_date_ts = pd.to_datetime('2020-01-01')
+        max_date_ts = pd.to_datetime(datetime.now())
         start_date, end_date = st.sidebar.slider(
             "분석 기간을 선택하세요",
-            min_value=min_date,
-            max_value=max_date,
-            value=(min_date, max_date),
+            min_value=min_date_ts.to_pydatetime(),
+            max_value=max_date_ts.to_pydatetime(),
+            value=(min_date_ts.to_pydatetime(), max_date_ts.to_pydatetime()),
             format="YYYY-MM-DD"
         )
         
@@ -559,4 +559,3 @@ else:
             st.dataframe(st.session_state.df_naver, use_container_width=True)
             st.subheader("TDS 데이터")
             st.dataframe(st.session_state.df_tds, use_container_width=True)
- 
