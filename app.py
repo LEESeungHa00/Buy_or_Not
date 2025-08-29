@@ -373,7 +373,7 @@ else:
             if not st.session_state.df_combined.empty:
                 corr_matrix = st.session_state.df_combined[['수입 중량', '수입 금액', '검색량']].corr()
                 st.subheader("상관관계 행렬")
-                st.dataframe(corr_matrix.style.background_gradient(cmap='Blues'), use_container_width=True)
+                st.dataframe(corr_matrix, use_container_width=True)
 
                 st.markdown(
                     """
