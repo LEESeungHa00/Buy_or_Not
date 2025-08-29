@@ -215,10 +215,19 @@ if st.session_state.df_imports.empty or st.session_state.df_tds.empty or st.sess
     st.warning("분석을 시작하려면 먼저 사이드바에서 **데이터 업로드 및 가져오기** 버튼을 눌러주세요.")
 else:
     # HS코드 목록 생성 및 전처리
-    df_imports_hscodes = st.session_state.df_imports[['HS코드', '품목명']].dropna()
-    df_tds_hscodes = st.session_state.df_tds.rename(columns={'Product Description': '품목명'})[['HS코드', '품목명']].dropna()
+    df_imports_hscodes = st.session_state.df_imports[
+        st.session_state.df_imports['수입 중량'] > 0
+    ].rename(columns={'국가': 'Origin Country', '수입 중량': 'Volume', '수입 금액': 'Value'})
     
-    all_hscodes = pd.concat([df_imports_hscodes, df_tds_hscodes]).drop_duplicates(subset='HS코드').sort_values(by='HS코드').reset_index(drop=True)
+    df_tds_hscodes = st.session_state.df_tds[
+        st.session_state.df_tds['Volume'] > 0
+    ]
+    
+    # 두 데이터프레임의 유효한 HS코드만 합치고 중복 제거
+    all_hscodes = pd.concat([
+        df_imports_hscodes[['HS코드', '품목명']].dropna(), 
+        df_tds_hscodes[['HS코드', 'Product Description']].rename(columns={'Product Description': '품목명'}).dropna()
+    ]).drop_duplicates(subset='HS코드').sort_values(by='HS코드').reset_index(drop=True)
     
     # 10자리 숫자 HS코드만 필터링
     all_hscodes = all_hscodes[all_hscodes['HS코드'].str.strip().str.len() == 10]
