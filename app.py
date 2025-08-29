@@ -236,19 +236,20 @@ else:
                 df_naver_monthly.set_index(df_naver_monthly['날짜'].dt.to_period('M'), inplace=True)
 
                 # 인덱스를 기준으로 두 데이터프레임 병합
-                st.session_state.df_combined = df_imports_monthly.join(df_naver_monthly, how='outer', lsuffix='_imports', rsuffix='_naver')
+                df_combined = df_imports_monthly.join(df_naver_monthly, how='outer')
 
                 # 컬럼 정리 및 NaN 값 채우기
-                st.session_state.df_combined.reset_index(inplace=True)
-                st.session_state.df_combined.rename(columns={'index': '기간'}, inplace=True)
+                df_combined.reset_index(inplace=True)
+                df_combined.rename(columns={'index': '기간'}, inplace=True)
                 
                 # 원본 기간/날짜 컬럼 삭제
-                st.session_state.df_combined.drop(['기간_imports', '날짜_naver'], axis=1, inplace=True)
+                df_combined.drop(['기간_imports', '날짜_naver'], axis=1, errors='ignore', inplace=True)
                 
-                st.session_state.df_combined['수입 중량'].fillna(0, inplace=True)
-                st.session_state.df_combined['수입 금액'].fillna(0, inplace=True)
-                st.session_state.df_combined['검색량'].fillna(0, inplace=True)
+                df_combined['수입 중량'].fillna(0, inplace=True)
+                df_combined['수입 금액'].fillna(0, inplace=True)
+                df_combined['검색량'].fillna(0, inplace=True)
 
+                st.session_state.df_combined = df_combined
                 st.success("데이터 통합 완료!")
             except Exception as e:
                 st.error(f"데이터 통합 중 오류가 발생했습니다. 선택한 HS코드에 해당하는 데이터가 없거나, 업로드한 파일 형식을 확인해주세요: {e}")
@@ -260,7 +261,7 @@ else:
 
         with tab1:
             st.header("커피 원두 시장 동향 분석")
-            if not st.session_state.df_combined.empty:
+            if not st.session_state.df_combined.empty and not st.session_state.df_combined['수입 중량'].sum() == 0:
                 # KPI 지표
                 col1, col2, col3 = st.columns(3)
                 with col1:
@@ -326,11 +327,11 @@ else:
                     )
                     st.plotly_chart(fig_country_val, use_container_chart=True)
             else:
-                st.warning("데이터 통합에 실패했습니다. 올바른 HS코드가 포함된 데이터를 선택했는지 확인해주세요.")
+                st.warning("선택한 HS코드에 대한 데이터가 존재하지 않아 대시보드를 표시할 수 없습니다.")
 
         with tab2:
             st.header("수요/가격 예측 모델 (간단한 회귀 모델)")
-            if not st.session_state.df_combined.empty:
+            if not st.session_state.df_combined.empty and not st.session_state.df_combined['수입 중량'].sum() == 0:
                 df_model = st.session_state.df_combined.copy()
                 
                 df_model['검색량_lag1'] = df_model['검색량'].shift(1)
@@ -366,11 +367,11 @@ else:
                 else:
                     st.warning("데이터가 너무 적어 예측 모델을 실행할 수 없습니다. 더 많은 데이터를 업로드해주세요.")
             else:
-                st.warning("데이터를 업로드하거나 구글 시트에서 읽어와 예측 모델을 활성화하세요. HS코드를 선택해주세요.")
+                st.warning("선택한 HS코드에 대한 데이터가 존재하지 않아 예측 모델을 활성화할 수 없습니다.")
 
         with tab3:
             st.header("데이터 상관관계 분석")
-            if not st.session_state.df_combined.empty:
+            if not st.session_state.df_combined.empty and not st.session_state.df_combined['수입 중량'].sum() == 0:
                 corr_matrix = st.session_state.df_combined[['수입 중량', '수입 금액', '검색량']].corr()
                 st.subheader("상관관계 행렬")
                 st.dataframe(corr_matrix, use_container_width=True)
@@ -397,7 +398,7 @@ else:
 
                 st.info("💡 **인사이트**: 검색량과 수입량 간의 양의 상관관계가 보인다면, 검색량 증가는 미래의 수요 증가를 시사합니다. 이를 통해 수입 물량 결정에 참고할 수 있습니다.")
             else:
-                st.warning("데이터를 업로드하거나 구글 시트에서 읽어와 상관관계 분석을 활성화하세요. HS코드를 선택해주세요.")
+                st.warning("선택한 HS코드에 대한 데이터가 존재하지 않아 상관관계 분석을 활성화할 수 없습니다.")
 
         with tab4:
             st.header("원본 데이터")
