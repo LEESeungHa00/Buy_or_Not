@@ -216,24 +216,26 @@ if st.session_state.df_imports.empty or st.session_state.df_tds.empty or st.sess
 else:
     # HS코드 목록 생성 및 전처리
     df_imports_hscodes = st.session_state.df_imports[
-        st.session_state.df_imports['수입 중량'] > 0
+        (st.session_state.df_imports['수입 중량'] > 0) & 
+        (st.session_state.df_imports['국가'].notna())
     ].rename(columns={'국가': 'Origin Country', '수입 중량': 'Volume', '수입 금액': 'Value'})
     
     df_tds_hscodes = st.session_state.df_tds[
-        st.session_state.df_tds['Volume'] > 0
+        (st.session_state.df_tds['Volume'] > 0) &
+        (st.session_state.df_tds['Origin Country'].notna())
     ]
     
     # 두 데이터프레임의 유효한 HS코드만 합치고 중복 제거
-    all_hscodes = pd.concat([
+    all_hscodes_valid_data = pd.concat([
         df_imports_hscodes[['HS코드', '품목명']].dropna(), 
         df_tds_hscodes[['HS코드', 'Product Description']].rename(columns={'Product Description': '품목명'}).dropna()
     ]).drop_duplicates(subset='HS코드').sort_values(by='HS코드').reset_index(drop=True)
     
     # 10자리 숫자 HS코드만 필터링
-    all_hscodes = all_hscodes[all_hscodes['HS코드'].str.strip().str.len() == 10]
-    all_hscodes['display_name'] = all_hscodes['HS코드'].astype(str) + ' - ' + all_hscodes['품목명']
+    all_hscodes_valid_data = all_hscodes_valid_data[all_hscodes_valid_data['HS코드'].str.strip().str.len() == 10]
+    all_hscodes_valid_data['display_name'] = all_hscodes_valid_data['HS코드'].astype(str) + ' - ' + all_hscodes_valid_data['품목명']
     
-    hscode_options = all_hscodes['display_name'].tolist()
+    hscode_options = all_hscodes_valid_data['display_name'].tolist()
 
     st.session_state.selected_hscodes = st.sidebar.multiselect(
         "분석할 HS코드를 선택하세요",
@@ -259,22 +261,11 @@ else:
         
         with st.spinner('데이터를 통합하는 중입니다...'):
             try:
-                # 관세청과 TDS 데이터 통합
-                df_imports_filtered = st.session_state.df_imports[
-                    st.session_state.df_imports['HS코드'].astype(str).isin(selected_codes)
+                # 관세청과 TDS 데이터 통합 (유효한 HS코드만)
+                df_combined_imports_tds = pd.concat([df_imports_hscodes, df_tds_hscodes], ignore_index=True)
+                df_combined_imports_tds = df_combined_imports_tds[
+                    df_combined_imports_tds['HS코드'].astype(str).isin(selected_codes)
                 ].copy()
-                df_imports_filtered['기간'] = pd.to_datetime(df_imports_filtered['기간'], format='%Y.%m', errors='coerce')
-                
-                df_tds_filtered = st.session_state.df_tds[
-                    st.session_state.df_tds['HS코드'].astype(str).isin(selected_codes)
-                ].copy()
-                df_tds_filtered['Date'] = pd.to_datetime(df_tds_filtered['Date'], errors='coerce')
-                
-                # '기간'과 'Date' 열을 기준으로 데이터 병합
-                df_combined_imports_tds = pd.concat([
-                    df_imports_filtered.rename(columns={'수입 중량': 'Volume', '수입 금액': 'Value', '기간': 'Date', '국가': 'Origin Country'}),
-                    df_tds_filtered
-                ], ignore_index=True)
                 
                 # 기간 필터링
                 df_combined_imports_tds['Date'] = pd.to_datetime(df_combined_imports_tds['Date'], errors='coerce')
@@ -407,6 +398,10 @@ else:
                 df_country_analysis.rename(columns={'Volume': '수입 중량', 'Value': '수입 금액'}, inplace=True)
                 df_country_analysis['단가'] = df_country_analysis['수입 금액'] / df_country_analysis['수입 중량']
                 df_country_analysis.dropna(subset=['단가', 'Origin Country'], inplace=True)
+                
+                # 상위 10개 국가만 추출
+                top_10_countries = df_country_analysis.groupby('Origin Country')['수입 중량'].sum().nlargest(10).index
+                df_country_analysis = df_country_analysis[df_country_analysis['Origin Country'].isin(top_10_countries)]
 
                 if not df_country_analysis.empty:
                     col_price, col_stability = st.columns(2)
@@ -443,21 +438,14 @@ else:
                 # 국가별 수입량/금액 그래프
                 st.subheader("국가별 수입량 및 금액")
                 
-                df_imports_country = st.session_state.df_imports[
-                    st.session_state.df_imports['HS코드'].astype(str).isin(selected_codes)
-                ].groupby('국가').agg({
-                    '수입 중량': 'sum',
-                    '수입 금액': 'sum'
-                }).reset_index()
+                # 상위 10개 국가 데이터만 추출
+                df_country_filtered = df_combined_imports_tds[df_combined_imports_tds['Origin Country'].isin(top_10_countries)]
                 
-                df_tds_country = st.session_state.df_tds[
-                    st.session_state.df_tds['HS코드'].astype(str).isin(selected_codes)
-                ].groupby('Origin Country').agg({
+                df_country = df_country_filtered.groupby('Origin Country').agg({
                     'Volume': 'sum',
                     'Value': 'sum'
                 }).reset_index().rename(columns={'Origin Country': '국가', 'Volume': '수입 중량', 'Value': '수입 금액'})
-                
-                df_country = pd.concat([df_imports_country, df_tds_country]).groupby('국가').sum().reset_index()
+
                 df_country = df_country.sort_values(by='수입 중량', ascending=False)
                 
                 if not df_country.empty:
