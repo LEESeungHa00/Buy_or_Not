@@ -237,6 +237,17 @@ else:
     if not selected_codes:
         st.warning("분석을 위해 최소 하나 이상의 HS코드를 선택해야 합니다.")
     else:
+        # 기간 선택 슬라이더
+        min_date = pd.to_datetime('2020-01-01')
+        max_date = pd.to_datetime(datetime.now())
+        start_date, end_date = st.sidebar.slider(
+            "분석 기간을 선택하세요",
+            min_value=min_date,
+            max_value=max_date,
+            value=(min_date, max_date),
+            format="YYYY-MM-DD"
+        )
+        
         with st.spinner('데이터를 통합하는 중입니다...'):
             try:
                 # 관세청과 TDS 데이터 통합
@@ -256,6 +267,14 @@ else:
                     df_tds_filtered
                 ], ignore_index=True)
                 
+                # 기간 필터링
+                df_combined_imports_tds['Date'] = pd.to_datetime(df_combined_imports_tds['Date'], errors='coerce')
+                df_combined_imports_tds.dropna(subset=['Date'], inplace=True)
+                df_combined_imports_tds = df_combined_imports_tds[
+                    (df_combined_imports_tds['Date'] >= pd.Timestamp(start_date)) & 
+                    (df_combined_imports_tds['Date'] <= pd.Timestamp(end_date))
+                ]
+                
                 # 월별로 데이터 그룹화
                 df_combined_monthly = df_combined_imports_tds.groupby(
                     pd.Grouper(key='Date', freq='M')
@@ -268,6 +287,10 @@ else:
                 df_naver_monthly = st.session_state.df_naver.copy()
                 df_naver_monthly['날짜'] = pd.to_datetime(df_naver_monthly['날짜'], errors='coerce')
                 df_naver_monthly.dropna(subset=['날짜'], inplace=True)
+                df_naver_monthly = df_naver_monthly[
+                    (df_naver_monthly['날짜'] >= pd.Timestamp(start_date)) & 
+                    (df_naver_monthly['날짜'] <= pd.Timestamp(end_date))
+                ]
                 df_naver_monthly = df_naver_monthly.groupby(
                     pd.Grouper(key='날짜', freq='M')
                 ).agg({'검색량': 'mean'}).reset_index()
@@ -361,6 +384,49 @@ else:
 
                 st.plotly_chart(fig1, use_container_width=True)
 
+                # -------------------------
+                # 원산지별 가격 경쟁력 및 공급 안정성 분석
+                # -------------------------
+                st.subheader("원산지별 가격 경쟁력 및 공급 안정성 분석")
+                
+                # TDS와 관세청 데이터 통합
+                df_country_analysis = df_combined_imports_tds.copy()
+                df_country_analysis.rename(columns={'Volume': '수입 중량', 'Value': '수입 금액'}, inplace=True)
+                df_country_analysis['단가'] = df_country_analysis['수입 금액'] / df_country_analysis['수입 중량']
+                df_country_analysis.dropna(subset=['단가', 'Origin Country'], inplace=True)
+
+                if not df_country_analysis.empty:
+                    col_price, col_stability = st.columns(2)
+
+                    with col_price:
+                        # 가격 경쟁력 (평균 단가)
+                        price_competitiveness = df_country_analysis.groupby('Origin Country')['단가'].mean().reset_index()
+                        price_competitiveness = price_competitiveness.sort_values(by='단가', ascending=True)
+                        fig_price = px.bar(
+                            price_competitiveness.head(10),
+                            x='Origin Country',
+                            y='단가',
+                            title='평균 단가($/kg) - 가격 경쟁력 (낮을수록 유리)',
+                            labels={'단가': '평균 단가 ($/kg)', 'Origin Country': '원산지'}
+                        )
+                        st.plotly_chart(fig_price, use_container_width=True)
+
+                    with col_stability:
+                        # 공급 안정성 (수입 중량 변동성)
+                        monthly_volume = df_country_analysis.groupby([pd.Grouper(key='Date', freq='M'), 'Origin Country'])['수입 중량'].sum().reset_index()
+                        stability = monthly_volume.groupby('Origin Country')['수입 중량'].std().reset_index().rename(columns={'수입 중량': '변동성'})
+                        stability = stability.sort_values(by='변동성', ascending=True)
+                        fig_stability = px.bar(
+                            stability.head(10),
+                            x='Origin Country',
+                            y='변동성',
+                            title='공급량 변동성 (낮을수록 안정적)',
+                            labels={'변동성': '표준편차', 'Origin Country': '원산지'}
+                        )
+                        st.plotly_chart(fig_stability, use_container_width=True)
+                else:
+                    st.warning("선택한 HS코드에 대한 원산지별 데이터가 충분하지 않아 분석을 표시할 수 없습니다.")
+                
                 # 국가별 수입량/금액 그래프
                 st.subheader("국가별 수입량 및 금액")
                 
@@ -408,6 +474,14 @@ else:
 
         with tab2:
             st.header("수요/가격 예측 모델 (간단한 회귀 모델)")
+            st.markdown("""
+            ---
+            ### **예측 로직 설명**
+            이 모델은 **단순 선형 회귀(Linear Regression)**를 사용합니다. 과거 **'네이버 검색량'** 데이터가 다음 달 **'수입 중량'**에 미치는 영향을 분석하여 미래의 수입량을 예측합니다. 즉, 소비자의 검색 관심도(수요)가 실제 수입(공급)으로 이어지는 경향을 파악하여 예측하는 방식입니다.
+
+            **💡 전략 인사이트**: 검색량이 수입량으로 이어지는 경향이 있습니다. 검색량 추이를 지속적으로 모니터링하여 미리 물량을 확보하면 재고 및 공급망 관리에 유리합니다.
+            """)
+            
             if not st.session_state.df_combined.empty and not st.session_state.df_combined['수입 중량'].sum() == 0:
                 df_model = st.session_state.df_combined.copy()
                 
