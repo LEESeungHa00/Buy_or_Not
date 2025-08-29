@@ -231,22 +231,20 @@ else:
                     {'검색량': 'mean'}
                 ).reset_index()
                 
-                # 최종 데이터 병합 (how='inner'를 'how='outer'로 변경)
-                st.session_state.df_combined = pd.merge(
-                    df_imports_monthly, 
-                    df_naver_monthly, 
-                    left_on=df_imports_monthly['기간'].dt.strftime('%Y-%m'), 
-                    right_on=df_naver_monthly['날짜'].dt.strftime('%Y-%m'),
-                    how='outer'
-                )
-                
-                # 병합 후 NaN 값 0으로 채우고 컬럼명 정리
-                st.session_state.df_combined.rename(columns={'key_0': '기간', '날짜': '네이버 날짜'}, inplace=True)
-                
-                # 기간 컬럼을 합치기
-                st.session_state.df_combined['기간'] = st.session_state.df_combined['기간'].fillna(st.session_state.df_combined['네이버 날짜'].dt.strftime('%Y-%m'))
-                st.session_state.df_combined.drop('네이버 날짜', axis=1, inplace=True)
+                # 데이터 병합을 위해 날짜 컬럼을 인덱스로 설정
+                df_imports_monthly.set_index(df_imports_monthly['기간'].dt.to_period('M'), inplace=True)
+                df_naver_monthly.set_index(df_naver_monthly['날짜'].dt.to_period('M'), inplace=True)
 
+                # 인덱스를 기준으로 두 데이터프레임 병합
+                st.session_state.df_combined = df_imports_monthly.join(df_naver_monthly, how='outer', lsuffix='_imports', rsuffix='_naver')
+
+                # 컬럼 정리 및 NaN 값 채우기
+                st.session_state.df_combined.reset_index(inplace=True)
+                st.session_state.df_combined.rename(columns={'index': '기간'}, inplace=True)
+                
+                # 원본 기간/날짜 컬럼 삭제
+                st.session_state.df_combined.drop(['기간_imports', '날짜_naver'], axis=1, inplace=True)
+                
                 st.session_state.df_combined['수입 중량'].fillna(0, inplace=True)
                 st.session_state.df_combined['수입 금액'].fillna(0, inplace=True)
                 st.session_state.df_combined['검색량'].fillna(0, inplace=True)
