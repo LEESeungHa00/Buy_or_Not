@@ -68,7 +68,13 @@ def read_google_sheet(sheet_name):
             sh = gc.open_by_url("https://docs.google.com/spreadsheets/d/12YdcKX3nvaNfFWYkJApRnoKAQnjCeR09AGRJ6rBiOuM/edit?gid=0#gid=0")
             worksheet = sh.worksheet(sheet_name)
             data = worksheet.get_all_records()
-            return pd.DataFrame(data)
+            df = pd.DataFrame(data)
+            
+            # 네이버 데이터랩 시트일 경우, '커피' 컬럼 이름을 '검색량'으로 변경
+            if sheet_name == '네이버 데이터랩' and '커피' in df.columns:
+                df.rename(columns={'커피': '검색량'}, inplace=True)
+                
+            return df
         except Exception as e:
             st.error(f"'{sheet_name}' 워크시트 읽기 오류: {e}")
             return pd.DataFrame()
@@ -83,6 +89,10 @@ def write_to_google_sheet(df, sheet_name):
         try:
             sh = gc.open_by_url("https://docs.google.com/spreadsheets/d/12YdcKX3nvaNfFWYkJApRnoKAQnjCeR09AGRJ6rBiOuM/edit?gid=0#gid=0")
             worksheet = sh.worksheet(sheet_name)
+            
+            # NaN 값을 빈 문자열로 대체하여 JSON 호환성 확보
+            df = df.fillna('')
+            
             worksheet.append_rows(df.values.tolist())
             st.success(f"데이터가 '{sheet_name}' 시트에 성공적으로 저장되었습니다.")
         except Exception as e:
