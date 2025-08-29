@@ -4,7 +4,7 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from sklearn.linear_model import LinearRegression
+import statsmodels.api as sm
 import io
 from datetime import datetime, timedelta
 
@@ -489,31 +489,71 @@ else:
                 df_model.dropna(inplace=True)
 
                 if not df_model.empty:
-                    model = LinearRegression()
-                    X = df_model[['검색량_lag1']]
+                    # statsmodels를 사용하여 신뢰구간을 계산합니다.
+                    X = sm.add_constant(df_model['검색량_lag1'])
                     y = df_model['수입 중량']
                     
-                    model.fit(X, y)
-                    df_model['예측 수입 중량'] = model.predict(X)
+                    model = sm.OLS(y, X).fit()
+                    
+                    # 예측값과 95% 신뢰구간을 가져옵니다.
+                    predictions = model.get_prediction(X)
+                    df_model['예측 수입 중량'] = predictions.predicted_mean
+                    conf_int = predictions.conf_int(alpha=0.05)
+                    df_model['conf_int_lower'] = conf_int[:, 0]
+                    df_model['conf_int_upper'] = conf_int[:, 1]
                     
                     st.write("---")
                     st.subheader("미래 수입량 예측")
                     
                     last_search_volume = df_model['검색량'].iloc[-1]
-                    predicted_volume = model.predict([[last_search_volume]])[0]
+                    predicted_volume = model.predict([1, last_search_volume])[0]
                     
                     st.success(f"다음 달 예상 수입량은 **{predicted_volume:,.0f} kg** 입니다.")
                     st.info("💡 **전략 인사이트**: 검색량이 수입량으로 이어지는 경향이 있습니다. 검색량 추이를 지속적으로 모니터링하여 미리 물량을 확보하세요.")
             
                     st.subheader("예측 모델 결과 시각화")
-                    fig_pred = px.line(
-                        df_model, 
-                        x='기간', 
-                        y=['수입 중량', '예측 수입 중량'],
-                        title='실제 수입량 vs. 예측 수입량',
-                        labels={'value': '수입량 (kg)', 'variable': '지표'}
+                    fig_pred = go.Figure()
+
+                    # 실제 수입량
+                    fig_pred.add_trace(go.Scatter(
+                        x=df_model['기간'],
+                        y=df_model['수입 중량'],
+                        mode='lines',
+                        name='실제 수입 중량'
+                    ))
+
+                    # 예측 수입량
+                    fig_pred.add_trace(go.Scatter(
+                        x=df_model['기간'],
+                        y=df_model['예측 수입 중량'],
+                        mode='lines',
+                        name='예측 수입 중량',
+                        line=dict(color='red', dash='dash')
+                    ))
+
+                    # 신뢰구간 (음영)
+                    fig_pred.add_trace(go.Scatter(
+                        x=df_model['기간'],
+                        y=df_model['conf_int_upper'],
+                        mode='lines',
+                        line=dict(width=0),
+                        showlegend=False
+                    ))
+                    fig_pred.add_trace(go.Scatter(
+                        x=df_model['기간'],
+                        y=df_model['conf_int_lower'],
+                        mode='lines',
+                        line=dict(width=0),
+                        fill='tonexty',
+                        fillcolor='rgba(200, 200, 200, 0.2)',
+                        name='95% 신뢰구간'
+                    ))
+
+                    fig_pred.update_layout(
+                        title_text="실제 수입량 vs. 예측 수입량 (95% 신뢰구간)",
+                        xaxis_title="기간",
+                        yaxis_title="수입량 (kg)"
                     )
-                    fig_pred.update_traces(hovertemplate="%{x|%Y-%m}<br>%{y:,.0f}")
                     st.plotly_chart(fig_pred, use_container_width=True)
                 else:
                     st.warning("데이터가 너무 적어 예측 모델을 실행할 수 없습니다. 더 많은 데이터를 업로드해주세요.")
