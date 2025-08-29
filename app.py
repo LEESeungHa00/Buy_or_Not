@@ -70,12 +70,10 @@ def read_google_sheet(sheet_name):
             sh = gc.open_by_url("https://docs.google.com/spreadsheets/d/12YdcKX3nvaNfFWYkJApRnoKAQnjCeR09AGRJ6rBiOuM/edit?gid=0#gid=0")
             worksheet = sh.worksheet(sheet_name)
             
-            # get_all_records() 대신 get_all_values()를 사용하여 헤더 문제를 우회
             all_data = worksheet.get_all_values()
             if not all_data:
                 return pd.DataFrame()
             
-            # 헤더에 빈 문자열이 있는 경우 고유한 이름으로 변경
             headers = all_data[0]
             seen = {}
             for i, header in enumerate(headers):
@@ -90,14 +88,20 @@ def read_google_sheet(sheet_name):
             data = all_data[1:]
             df = pd.DataFrame(data, columns=headers)
             
-            # 네이버 데이터랩 시트일 경우, '커피' 컬럼 이름을 '검색량'으로 변경 및 숫자형으로 변환
-            if sheet_name == '네이버 데이터랩' and '커피' in df.columns:
-                df.rename(columns={'커피': '검색량'}, inplace=True)
+            # 데이터 정제 및 타입 변환
+            if sheet_name == '네이버 데이터랩':
+                if '커피' in df.columns:
+                    df.rename(columns={'커피': '검색량'}, inplace=True)
                 df['검색량'] = pd.to_numeric(df['검색량'], errors='coerce')
-            
-            # TDS 시트일 경우, 'Detailed HS-CODE' 컬럼명을 'HS코드'로 변경
-            if sheet_name == 'TDS' and 'Detailed HS-CODE' in df.columns:
-                df.rename(columns={'Detailed HS-CODE': 'HS코드'}, inplace=True)
+            elif sheet_name == 'TDS':
+                if 'Detailed HS-CODE' in df.columns:
+                    df.rename(columns={'Detailed HS-CODE': 'HS코드'}, inplace=True)
+                df['Volume'] = pd.to_numeric(df['Volume'], errors='coerce')
+                df['Value'] = pd.to_numeric(df['Value'], errors='coerce')
+            elif sheet_name == '관세청':
+                df['수입 중량'] = pd.to_numeric(df['수입 중량'], errors='coerce')
+                df['수입 금액'] = pd.to_numeric(df['수입 금액'], errors='coerce')
+
             return df
         except Exception as e:
             st.error(f"'{sheet_name}' 워크시트 읽기 오류: {e}")
@@ -109,7 +113,7 @@ def read_google_sheet(sheet_name):
 # -----------------
 st.sidebar.header("데이터 업로드 및 가져오기")
 uploaded_imports = st.sidebar.file_uploader("1. 관세청 데이터 (.csv)", type="csv", key="imports")
-uploaded_naver = st.file_uploader("2. 네이버 데이터랩 (.csv)", type="csv", key="naver")
+uploaded_naver = st.sidebar.file_uploader("2. 네이버 데이터랩 (.csv)", type="csv", key="naver")
 uploaded_tds = st.sidebar.file_uploader("3. 트릿지 데이터 (.csv)", type="csv", key="tds")
 
 def load_data():
@@ -119,6 +123,9 @@ def load_data():
             if '기간' not in df.columns:
                 if '년' in df.columns and '월' in df.columns:
                     df['기간'] = df['년'].astype(str) + '.' + df['월'].astype(str).str.zfill(2)
+            # 수입량, 수입금액 숫자형 변환
+            df['수입 중량'] = pd.to_numeric(df['수입 중량'], errors='coerce')
+            df['수입 금액'] = pd.to_numeric(df['수입 금액'], errors='coerce')
             st.session_state.df_imports = pd.concat([st.session_state.df_imports, df], ignore_index=True)
             st.sidebar.success("관세청 데이터 업로드 완료!")
         except Exception as e:
@@ -137,11 +144,9 @@ def load_data():
 
     if uploaded_tds:
         try:
-            # CSV 파일을 문자열로 읽어 헤더 문제를 직접 처리
             df_raw = uploaded_tds.getvalue().decode("utf-8")
             df = pd.read_csv(io.StringIO(df_raw), header=None)
             
-            # 첫 행을 헤더로 설정하고, 중복/빈 열 이름 정리
             headers = df.iloc[0].tolist()
             seen = {}
             new_headers = []
@@ -158,6 +163,14 @@ def load_data():
             
             df.columns = new_headers
             df = df.iloc[1:].reset_index(drop=True)
+            
+            # TDS 데이터의 수치형 컬럼 변환
+            if 'Detailed HS-CODE' in df.columns:
+                df.rename(columns={'Detailed HS-CODE': 'HS코드'}, inplace=True)
+            if 'Volume' in df.columns:
+                df['Volume'] = pd.to_numeric(df['Volume'], errors='coerce')
+            if 'Value' in df.columns:
+                df['Value'] = pd.to_numeric(df['Value'], errors='coerce')
 
             st.session_state.df_tds = pd.concat([st.session_state.df_tds, df], ignore_index=True)
             st.sidebar.success("TDS 업로드 완료!")
@@ -176,16 +189,10 @@ if st.sidebar.button("데이터 업로드 및 가져오기"):
 if st.session_state.df_imports.empty or st.session_state.df_tds.empty or st.session_state.df_naver.empty:
     st.warning("분석을 시작하려면 먼저 사이드바에서 **데이터 업로드 및 가져오기** 버튼을 눌러주세요.")
 else:
-    # HS코드 선택 기능
     all_hscodes = pd.concat([
         st.session_state.df_imports[['HS코드', '품목명']],
-        st.session_state.df_tds[['HS코드', 'Product Description']]
-    ]).drop_duplicates().sort_values(by='HS코드').reset_index(drop=True)
-    
-    if 'Product Description' in all_hscodes.columns:
-        all_hscodes.rename(columns={'Product Description': '품목명'}, inplace=True)
-    
-    all_hscodes = all_hscodes.drop_duplicates(subset=['HS코드'])
+        st.session_state.df_tds.rename(columns={'Product Description': '품목명'})[['HS코드', '품목명']]
+    ]).drop_duplicates(subset='HS코드').sort_values(by='HS코드').reset_index(drop=True)
     
     hscode_options = [f"{row['HS코드']} - {row['품목명']}" for index, row in all_hscodes.iterrows()]
     st.session_state.selected_hscodes = st.sidebar.multiselect(
@@ -199,7 +206,6 @@ else:
     if not selected_codes:
         st.warning("분석을 위해 최소 하나 이상의 HS코드를 선택해야 합니다.")
     else:
-        # 데이터 결합
         with st.spinner('데이터를 통합하는 중입니다...'):
             try:
                 # 관세청 데이터 필터링 및 전처리
@@ -273,12 +279,12 @@ else:
 
                 # 국가별 수입량/금액 그래프
                 st.subheader("국가별 수입량 및 금액")
-                df_country = st.session_state.df_imports[
+                df_imports_country = st.session_state.df_imports[
                     st.session_state.df_imports['HS코드'].astype(str).isin(selected_codes)
                 ].groupby('국가').agg({
                     '수입 중량': 'sum',
                     '수입 금액': 'sum'
-                }).reset_index().sort_values(by='수입 중량', ascending=False)
+                }).reset_index()
                 
                 df_tds_country = st.session_state.df_tds[
                     st.session_state.df_tds['HS코드'].astype(str).isin(selected_codes)
@@ -287,7 +293,7 @@ else:
                     'Value': 'sum'
                 }).reset_index().rename(columns={'Origin Country': '국가', 'Volume': '수입 중량', 'Value': '수입 금액'})
                 
-                df_country = pd.concat([df_country, df_tds_country]).groupby('국가').sum().reset_index()
+                df_country = pd.concat([df_imports_country, df_tds_country]).groupby('국가').sum().reset_index()
                 df_country = df_country.sort_values(by='수입 중량', ascending=False)
 
                 col1_bar, col2_bar = st.columns(2)
