@@ -29,7 +29,7 @@ if 'df_combined' not in st.session_state:
 if 'selected_hscodes' not in st.session_state:
     st.session_state.selected_hscodes = []
 
-st.title("🧭 Compass - Data-Driven Direction")
+st.title("🧭 Compass : Data-Driven Direction")
 
 st.markdown("""
 <style>
@@ -90,9 +90,10 @@ def read_google_sheet(sheet_name):
             data = all_data[1:]
             df = pd.DataFrame(data, columns=headers)
             
-            # 네이버 데이터랩 시트일 경우, '커피' 컬럼 이름을 '검색량'으로 변경
+            # 네이버 데이터랩 시트일 경우, '커피' 컬럼 이름을 '검색량'으로 변경 및 숫자형으로 변환
             if sheet_name == '네이버 데이터랩' and '커피' in df.columns:
                 df.rename(columns={'커피': '검색량'}, inplace=True)
+                df['검색량'] = pd.to_numeric(df['검색량'], errors='coerce')
             
             # TDS 시트일 경우, 'Detailed HS-CODE' 컬럼명을 'HS코드'로 변경
             if sheet_name == 'TDS' and 'Detailed HS-CODE' in df.columns:
@@ -108,7 +109,7 @@ def read_google_sheet(sheet_name):
 # -----------------
 st.sidebar.header("데이터 업로드 및 가져오기")
 uploaded_imports = st.sidebar.file_uploader("1. 관세청 데이터 (.csv)", type="csv", key="imports")
-uploaded_naver = st.sidebar.file_uploader("2. 네이버 데이터랩 (.csv)", type="csv", key="naver")
+uploaded_naver = st.file_uploader("2. 네이버 데이터랩 (.csv)", type="csv", key="naver")
 uploaded_tds = st.sidebar.file_uploader("3. 트릿지 데이터 (.csv)", type="csv", key="tds")
 
 def load_data():
@@ -127,6 +128,8 @@ def load_data():
         try:
             df = pd.read_csv(uploaded_naver, skiprows=6)
             df.columns = ['날짜', '검색량']
+            # 검색량 컬럼을 숫자형으로 변환
+            df['검색량'] = pd.to_numeric(df['검색량'], errors='coerce')
             st.session_state.df_naver = pd.concat([st.session_state.df_naver, df], ignore_index=True)
             st.sidebar.success("네이버 데이터랩 업로드 완료!")
         except Exception as e:
@@ -134,20 +137,27 @@ def load_data():
 
     if uploaded_tds:
         try:
-            df = pd.read_csv(uploaded_tds)
+            # CSV 파일을 문자열로 읽어 헤더 문제를 직접 처리
+            df_raw = uploaded_tds.getvalue().decode("utf-8")
+            df = pd.read_csv(io.StringIO(df_raw), header=None)
             
-            # CSV 파일 업로드 시에도 헤더에 빈 문자열이 있는 경우 고유한 이름으로 변경
-            headers = df.columns.tolist()
+            # 첫 행을 헤더로 설정하고, 중복/빈 열 이름 정리
+            headers = df.iloc[0].tolist()
             seen = {}
+            new_headers = []
             for i, header in enumerate(headers):
-                if not header:
-                    headers[i] = f'Unnamed_{i}'
+                if not isinstance(header, str) or not header:
+                    new_header = f'Unnamed_{i}'
                 elif header in seen:
-                    headers[i] = f'{header}_{seen[header]}'
                     seen[header] += 1
+                    new_header = f'{header}_{seen[header]}'
                 else:
                     seen[header] = 1
-            df.columns = headers
+                    new_header = header
+                new_headers.append(new_header)
+            
+            df.columns = new_headers
+            df = df.iloc[1:].reset_index(drop=True)
 
             st.session_state.df_tds = pd.concat([st.session_state.df_tds, df], ignore_index=True)
             st.sidebar.success("TDS 업로드 완료!")
