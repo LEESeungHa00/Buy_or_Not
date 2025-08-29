@@ -206,6 +206,8 @@ def load_data():
                 df['HS코드'] = normalize_hscode(df['HS코드'])
             if 'Date' in df.columns:
                 df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+            
+            # TDS에만 있는 컬럼 확인 및 추가
             if 'Raw Importer Name' not in df.columns: df['Raw Importer Name'] = ''
             if 'Exporter' not in df.columns: df['Exporter'] = ''
 
@@ -226,8 +228,14 @@ if st.sidebar.button("데이터 업로드 및 가져오기"):
 if st.session_state.df_imports.empty or st.session_state.df_tds.empty or st.session_state.df_naver.empty:
     st.warning("분석을 시작하려면 먼저 사이드바에서 **데이터 업로드 및 가져오기** 버튼을 눌러주세요.")
 else:
+    df_imports_renamed = st.session_state.df_imports.rename(columns={'국가': 'Origin Country', '수입 중량': 'Volume', '수입 금액': 'Value'})
+    
+    # Ensure TDS-specific columns are present in df_imports_renamed
+    if 'Raw Importer Name' not in df_imports_renamed.columns: df_imports_renamed['Raw Importer Name'] = ''
+    if 'Exporter' not in df_imports_renamed.columns: df_imports_renamed['Exporter'] = ''
+
     df_combined_imports_tds = pd.concat([
-        st.session_state.df_imports.rename(columns={'국가': 'Origin Country', '수입 중량': 'Volume', '수입 금액': 'Value', '기간': 'Date'}),
+        df_imports_renamed,
         st.session_state.df_tds.rename(columns={'Product Description': '품목명'})
     ], ignore_index=True)
     
@@ -381,9 +389,9 @@ else:
                 df_country_analysis['단가'] = df_country_analysis['Value'] / df_country_analysis['Volume']
                 df_country_analysis.dropna(subset=['단가', 'Origin Country'], inplace=True)
                 
-                if 'Exporter' in df_filtered.columns and 'Importer' in df_filtered.columns:
+                if 'Exporter' in df_filtered.columns and 'Raw Importer Name' in df_filtered.columns:
                     df_filtered['Exporter'].fillna('', inplace=True)
-                    df_filtered['Importer'].fillna('', inplace=True)
+                    df_filtered['Raw Importer Name'].fillna('', inplace=True)
 
                 if not df_country_analysis.empty:
                     col_price, col_stability = st.columns(2)
@@ -440,7 +448,7 @@ else:
                             title='주요 수입국 (수입량 기준)',
                             labels={'수입 중량': '수입량 (kg)'}
                         ))
-                        fig_country_vol.update_traces(hovertemplate='<b>%{x}</b><br>수입 중량: %{y:,.0f} kg<extra></extra>')
+                        fig_country_vol.update_traces(hovertemplate='<b>%{x}</b><br>수입 중량: %{y:,.0f} kg<extra></extra>', text=None, texttemplate=None)
                         st.plotly_chart(fig_country_vol, use_container_width=True)
                     with col2_bar:
                         fig_country_val = go.Figure(px.bar(
@@ -450,7 +458,7 @@ else:
                             title='주요 수입국 (수입금액 기준)',
                             labels={'수입 금액': '수입금액 ($)'}
                         ))
-                        fig_country_val.update_traces(hovertemplate='<b>%{x}</b><br>수입 금액: %{y:,.0f} $<extra></extra>')
+                        fig_country_val.update_traces(hovertemplate='<b>%{x}</b><br>수입 금액: %{y:,.0f} $<extra></extra>', text=None, texttemplate=None)
                         st.plotly_chart(fig_country_val, use_container_chart=True)
                 else:
                     st.warning("선택한 HS코드에 대한 국가별 데이터가 없습니다.")
@@ -612,7 +620,8 @@ else:
                 
                 st.subheader("수입/수출업체 현황 분석")
                 
-                if 'Raw Importer Name' in df_filtered.columns and 'Exporter' in df_filtered.columns:
+                # Check for the existence of the TDS-specific columns and handle them gracefully
+                if 'Raw Importer Name' in df_filtered.columns and 'Exporter' in df_filtered.columns and df_filtered['Raw Importer Name'].any() and df_filtered['Exporter'].any():
                     col_importer, col_exporter = st.columns(2)
                     
                     with col_importer:
@@ -651,37 +660,42 @@ else:
                     
                     if selected_country_importer:
                         df_country_importers = df_filtered[df_filtered['Origin Country'] == selected_country_importer].copy()
-                        df_importers_ranked = df_country_importers.groupby('Raw Importer Name')['Volume'].sum().nlargest(10).reset_index()
-                        
-                        st.markdown(f"**{selected_country_importer}에서 가장 많이 수입하는 업체**")
-                        fig_country_importers = go.Figure(px.bar(
-                            df_importers_ranked,
-                            x='Raw Importer Name',
-                            y='Volume',
-                            title=f"{selected_country_importer} 수입량 기준 상위 10개 업체",
-                            labels={'Raw Importer Name': '수입업체', 'Volume': '수입 중량 (kg)'}
-                        ))
-                        fig_country_importers.update_traces(hovertemplate='<b>%{x}</b><br>수입 중량: %{y:,.0f} kg<extra></extra>')
-                        st.plotly_chart(fig_country_importers, use_container_width=True)
+                        if not df_country_importers.empty:
+                            df_importers_ranked = df_country_importers.groupby('Raw Importer Name')['Volume'].sum().nlargest(10).reset_index()
+                            
+                            st.markdown(f"**{selected_country_importer}에서 가장 많이 수입하는 업체**")
+                            fig_country_importers = go.Figure(px.bar(
+                                df_importers_ranked,
+                                x='Raw Importer Name',
+                                y='Volume',
+                                title=f"{selected_country_importer} 수입량 기준 상위 10개 업체",
+                                labels={'Raw Importer Name': '수입업체', 'Volume': '수입 중량 (kg)'}
+                            ))
+                            fig_country_importers.update_traces(hovertemplate='<b>%{x}</b><br>수입 중량: %{y:,.0f} kg<extra></extra>')
+                            st.plotly_chart(fig_country_importers, use_container_width=True)
 
-                        all_importers = df_filtered['Raw Importer Name'].dropna().unique().tolist()
-                        country_importers = df_country_importers['Raw Importer Name'].dropna().unique().tolist()
-                        other_importers = [imp for imp in all_importers if imp not in country_importers]
-                        
-                        df_other_importers = df_filtered[df_filtered['Raw Importer Name'].isin(other_importers)].copy()
-                        df_other_importers_ranked = df_other_importers.groupby('Raw Importer Name')['Volume'].sum().nlargest(10).reset_index()
-
-                        st.markdown(f"**{selected_country_importer} 외 다른 국가에서 많이 수입하는 업체**")
-                        fig_other_importers = go.Figure(px.bar(
-                            df_other_importers_ranked,
-                            x='Raw Importer Name',
-                            y='Volume',
-                            title=f"{selected_country_importer} 외 수입량 기준 상위 10개 업체",
-                            labels={'Raw Importer Name': '수입업체', 'Volume': '수입 중량 (kg)'}
-                        ))
-                        fig_other_importers.update_traces(hovertemplate='<b>%{x}</b><br>수입 중량: %{y:,.0f} kg<extra></extra>')
-                        st.plotly_chart(fig_other_importers, use_container_width=True)
-
+                            all_importers = df_filtered['Raw Importer Name'].dropna().unique().tolist()
+                            country_importers = df_country_importers['Raw Importer Name'].dropna().unique().tolist()
+                            other_importers = [imp for imp in all_importers if imp not in country_importers]
+                            
+                            df_other_importers = df_filtered[df_filtered['Raw Importer Name'].isin(other_importers)].copy()
+                            df_other_importers_ranked = df_other_importers.groupby('Raw Importer Name')['Volume'].sum().nlargest(10).reset_index()
+                            
+                            if not df_other_importers_ranked.empty:
+                                st.markdown(f"**{selected_country_importer} 외 다른 국가에서 많이 수입하는 업체**")
+                                fig_other_importers = go.Figure(px.bar(
+                                    df_other_importers_ranked,
+                                    x='Raw Importer Name',
+                                    y='Volume',
+                                    title=f"{selected_country_importer} 외 수입량 기준 상위 10개 업체",
+                                    labels={'Raw Importer Name': '수입업체', 'Volume': '수입 중량 (kg)'}
+                                ))
+                                fig_other_importers.update_traces(hovertemplate='<b>%{x}</b><br>수입 중량: %{y:,.0f} kg<extra></extra>')
+                                st.plotly_chart(fig_other_importers, use_container_width=True)
+                            else:
+                                st.warning(f"다른 국가에서 수입하는 업체 정보가 없습니다.")
+                        else:
+                            st.warning(f"선택한 {selected_country_importer}에 대한 업체 데이터가 충분하지 않습니다.")
                 else:
                     st.warning("TDS 데이터에 '수출업체' 또는 '수입업체' 정보가 없어 분석할 수 없습니다.")
             else:
