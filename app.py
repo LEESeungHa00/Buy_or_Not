@@ -69,8 +69,16 @@ def read_google_sheet(sheet_name):
         try:
             sh = gc.open_by_url("https://docs.google.com/spreadsheets/d/12YdcKX3nvaNfFWYkJApRnoKAQnjCeR09AGRJ6rBiOuM/edit?gid=0#gid=0")
             worksheet = sh.worksheet(sheet_name)
-            data = worksheet.get_all_records()
-            df = pd.DataFrame(data)
+            
+            # get_all_records() 대신 get_all_values()를 사용하여 헤더 문제를 우회
+            all_data = worksheet.get_all_values()
+            if not all_data:
+                return pd.DataFrame()
+            
+            # 첫 번째 행을 헤더로 사용하고 나머지 데이터를 DataFrame으로 변환
+            headers = all_data[0]
+            data = all_data[1:]
+            df = pd.DataFrame(data, columns=headers)
             
             # 네이버 데이터랩 시트일 경우, '커피' 컬럼 이름을 '검색량'으로 변경
             if sheet_name == '네이버 데이터랩' and '커피' in df.columns:
@@ -266,7 +274,7 @@ else:
                         title='주요 수입국 (수입금액 기준)',
                         labels={'수입 금액': '수입금액 ($)'}
                     )
-                    st.plotly_chart(fig_country_val, use_container_width=True)
+                    st.plotly_chart(fig_country_val, use_container_chart=True)
             else:
                 st.warning("데이터 통합에 실패했습니다. 올바른 HS코드가 포함된 데이터를 선택했는지 확인해주세요.")
 
