@@ -327,6 +327,10 @@ else:
 
         with tab1:
             st.header("커피 원두 시장 동향 분석")
+            # 데이터 개수 표시
+            total_filtered_rows = df_combined_imports_tds.shape[0]
+            st.info(f"선택한 HS코드에 대한 총 데이터 행: {total_filtered_rows}개")
+
             if not st.session_state.df_combined.empty and not st.session_state.df_combined['수입 중량'].sum() == 0:
                 # KPI 지표
                 col1, col2, col3 = st.columns(3)
