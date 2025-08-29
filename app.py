@@ -59,6 +59,12 @@ def get_google_sheet_client():
     except Exception as e:
         st.error(f"구글 시트 인증 오류: {e}")
         return None
+        
+def normalize_hscode(hscode_series):
+    """
+    HS코드를 10자리 문자열로 정규화합니다.
+    """
+    return hscode_series.astype(str).str.strip().str.zfill(10)
 
 def read_google_sheet(sheet_name):
     """
@@ -98,9 +104,13 @@ def read_google_sheet(sheet_name):
                     df.rename(columns={'Detailed HS-CODE': 'HS코드'}, inplace=True)
                 df['Volume'] = pd.to_numeric(df['Volume'], errors='coerce')
                 df['Value'] = pd.to_numeric(df['Value'], errors='coerce')
+                if 'HS코드' in df.columns:
+                    df['HS코드'] = normalize_hscode(df['HS코드'])
             elif sheet_name == '관세청':
                 df['수입 중량'] = pd.to_numeric(df['수입 중량'], errors='coerce')
                 df['수입 금액'] = pd.to_numeric(df['수입 금액'], errors='coerce')
+                if 'HS코드' in df.columns:
+                    df['HS코드'] = normalize_hscode(df['HS코드'])
 
             return df
         except Exception as e:
@@ -126,6 +136,10 @@ def load_data():
             # 수입량, 수입금액 숫자형 변환
             df['수입 중량'] = pd.to_numeric(df['수입 중량'], errors='coerce')
             df['수입 금액'] = pd.to_numeric(df['수입 금액'], errors='coerce')
+            # HS코드 정규화
+            if 'HS코드' in df.columns:
+                df['HS코드'] = normalize_hscode(df['HS코드'])
+
             st.session_state.df_imports = pd.concat([st.session_state.df_imports, df], ignore_index=True)
             st.sidebar.success("관세청 데이터 업로드 완료!")
         except Exception as e:
@@ -171,6 +185,9 @@ def load_data():
                 df['Volume'] = pd.to_numeric(df['Volume'], errors='coerce')
             if 'Value' in df.columns:
                 df['Value'] = pd.to_numeric(df['Value'], errors='coerce')
+            # HS코드 정규화
+            if 'HS코드' in df.columns:
+                df['HS코드'] = normalize_hscode(df['HS코드'])
 
             st.session_state.df_tds = pd.concat([st.session_state.df_tds, df], ignore_index=True)
             st.sidebar.success("TDS 업로드 완료!")
@@ -189,12 +206,16 @@ if st.sidebar.button("데이터 업로드 및 가져오기"):
 if st.session_state.df_imports.empty or st.session_state.df_tds.empty or st.session_state.df_naver.empty:
     st.warning("분석을 시작하려면 먼저 사이드바에서 **데이터 업로드 및 가져오기** 버튼을 눌러주세요.")
 else:
-    all_hscodes = pd.concat([
-        st.session_state.df_imports[['HS코드', '품목명']],
-        st.session_state.df_tds.rename(columns={'Product Description': '품목명'})[['HS코드', '품목명']]
-    ]).drop_duplicates(subset='HS코드').sort_values(by='HS코드').reset_index(drop=True)
+    # HS코드 목록 생성 및 전처리
+    df_imports_hscodes = st.session_state.df_imports[['HS코드', '품목명']].dropna()
+    df_tds_hscodes = st.session_state.df_tds.rename(columns={'Product Description': '품목명'})[['HS코드', '품목명']].dropna()
     
-    hscode_options = [f"{row['HS코드']} - {row['품목명']}" for index, row in all_hscodes.iterrows()]
+    all_hscodes = pd.concat([df_imports_hscodes, df_tds_hscodes]).drop_duplicates(subset='HS코드').sort_values(by='HS코드').reset_index(drop=True)
+    all_hscodes = all_hscodes[all_hscodes['HS코드'].str.strip() != '']
+    all_hscodes['display_name'] = all_hscodes['HS코드'].astype(str) + ' - ' + all_hscodes['품목명']
+    
+    hscode_options = all_hscodes['display_name'].tolist()
+
     st.session_state.selected_hscodes = st.sidebar.multiselect(
         "분석할 HS코드를 선택하세요",
         options=hscode_options,
@@ -208,46 +229,58 @@ else:
     else:
         with st.spinner('데이터를 통합하는 중입니다...'):
             try:
-                # 관세청 데이터 필터링 및 전처리
+                # 관세청과 TDS 데이터 통합
                 df_imports_filtered = st.session_state.df_imports[
                     st.session_state.df_imports['HS코드'].astype(str).isin(selected_codes)
                 ].copy()
                 df_imports_filtered['기간'] = pd.to_datetime(df_imports_filtered['기간'], format='%Y.%m', errors='coerce')
-                df_imports_filtered.dropna(subset=['기간'], inplace=True)
-                df_imports_monthly = df_imports_filtered.groupby(
-                    pd.Grouper(key='기간', freq='M')
+                
+                df_tds_filtered = st.session_state.df_tds[
+                    st.session_state.df_tds['HS코드'].astype(str).isin(selected_codes)
+                ].copy()
+                df_tds_filtered['Date'] = pd.to_datetime(df_tds_filtered['Date'], errors='coerce')
+                
+                # '기간'과 'Date' 열을 기준으로 데이터 병합
+                df_combined_imports_tds = pd.concat([
+                    df_imports_filtered.rename(columns={'수입 중량': 'Volume', '수입 금액': 'Value', '기간': 'Date', '국가': 'Origin Country'}),
+                    df_tds_filtered
+                ], ignore_index=True)
+                
+                # 월별로 데이터 그룹화
+                df_combined_monthly = df_combined_imports_tds.groupby(
+                    pd.Grouper(key='Date', freq='M')
                 ).agg({
-                    '수입 중량': 'sum',
-                    '수입 금액': 'sum'
-                }).reset_index()
-
-                # 네이버 데이터랩 데이터 전처리
+                    'Volume': 'sum',
+                    'Value': 'sum'
+                }).reset_index().rename(columns={'Volume': '수입 중량', 'Value': '수입 금액'})
+                
+                # 네이버 데이터랩 전처리
                 df_naver_monthly = st.session_state.df_naver.copy()
                 df_naver_monthly['날짜'] = pd.to_datetime(df_naver_monthly['날짜'], errors='coerce')
                 df_naver_monthly.dropna(subset=['날짜'], inplace=True)
                 df_naver_monthly = df_naver_monthly.groupby(
                     pd.Grouper(key='날짜', freq='M')
-                ).agg(
-                    {'검색량': 'mean'}
-                ).reset_index()
-                
-                # 데이터 병합을 위해 날짜 컬럼을 인덱스로 설정
-                df_imports_monthly.set_index(df_imports_monthly['기간'].dt.to_period('M'), inplace=True)
-                df_naver_monthly.set_index(df_naver_monthly['날짜'].dt.to_period('M'), inplace=True)
+                ).agg({'검색량': 'mean'}).reset_index()
 
-                # 인덱스를 기준으로 두 데이터프레임 병합
-                df_combined = df_imports_monthly.join(df_naver_monthly, how='outer')
-
-                # 컬럼 정리 및 NaN 값 채우기
-                df_combined.reset_index(inplace=True)
-                df_combined.rename(columns={'index': '기간'}, inplace=True)
+                # 최종 데이터 통합
+                df_combined = pd.merge(
+                    df_combined_monthly,
+                    df_naver_monthly,
+                    left_on=df_combined_monthly['Date'].dt.strftime('%Y-%m'),
+                    right_on=df_naver_monthly['날짜'].dt.strftime('%Y-%m'),
+                    how='outer'
+                )
                 
-                # 원본 기간/날짜 컬럼 삭제
-                df_combined.drop(['기간_imports', '날짜_naver'], axis=1, errors='ignore', inplace=True)
-                
+                # 열 이름 및 결측치 정리
+                df_combined.rename(columns={'key_0': '기간', '수입 중량_x': '수입 중량', '수입 금액_x': '수입 금액'}, inplace=True)
+                df_combined.drop(['Date', '날짜'], axis=1, errors='ignore', inplace=True)
                 df_combined['수입 중량'].fillna(0, inplace=True)
                 df_combined['수입 금액'].fillna(0, inplace=True)
                 df_combined['검색량'].fillna(0, inplace=True)
+                
+                # TDS에서 온 '기간' 컬럼이 있으면 제거
+                if '기간_y' in df_combined.columns:
+                    df_combined.drop('기간_y', axis=1, inplace=True)
 
                 st.session_state.df_combined = df_combined
                 st.success("데이터 통합 완료!")
@@ -271,7 +304,6 @@ else:
                     total_value = st.session_state.df_combined['수입 금액'].sum() / 1000000
                     st.metric("총 수입금액 (백만 $)", f"{total_value:,.2f}")
                 with col3:
-                    # '수입 중량'이 0인 경우를 방지
                     valid_data = st.session_state.df_combined[st.session_state.df_combined['수입 중량'] > 0]
                     avg_unit_price = (valid_data['수입 금액'] / valid_data['수입 중량']).mean()
                     st.metric("평균 단가 ($/kg)", f"{avg_unit_price:,.2f}" if not pd.isna(avg_unit_price) else "N/A")
@@ -290,6 +322,7 @@ else:
 
                 # 국가별 수입량/금액 그래프
                 st.subheader("국가별 수입량 및 금액")
+                
                 df_imports_country = st.session_state.df_imports[
                     st.session_state.df_imports['HS코드'].astype(str).isin(selected_codes)
                 ].groupby('국가').agg({
@@ -306,26 +339,29 @@ else:
                 
                 df_country = pd.concat([df_imports_country, df_tds_country]).groupby('국가').sum().reset_index()
                 df_country = df_country.sort_values(by='수입 중량', ascending=False)
-
-                col1_bar, col2_bar = st.columns(2)
-                with col1_bar:
-                    fig_country_vol = px.bar(
-                        df_country.head(10), 
-                        x='국가', 
-                        y='수입 중량', 
-                        title='주요 수입국 (수입량 기준)',
-                        labels={'수입 중량': '수입량 (kg)'}
-                    )
-                    st.plotly_chart(fig_country_vol, use_container_width=True)
-                with col2_bar:
-                    fig_country_val = px.bar(
-                        df_country.sort_values(by='수입 금액', ascending=False).head(10), 
-                        x='국가', 
-                        y='수입 금액', 
-                        title='주요 수입국 (수입금액 기준)',
-                        labels={'수입 금액': '수입금액 ($)'}
-                    )
-                    st.plotly_chart(fig_country_val, use_container_chart=True)
+                
+                if not df_country.empty:
+                    col1_bar, col2_bar = st.columns(2)
+                    with col1_bar:
+                        fig_country_vol = px.bar(
+                            df_country.head(10), 
+                            x='국가', 
+                            y='수입 중량', 
+                            title='주요 수입국 (수입량 기준)',
+                            labels={'수입 중량': '수입량 (kg)'}
+                        )
+                        st.plotly_chart(fig_country_vol, use_container_width=True)
+                    with col2_bar:
+                        fig_country_val = px.bar(
+                            df_country.sort_values(by='수입 금액', ascending=False).head(10), 
+                            x='국가', 
+                            y='수입 금액', 
+                            title='주요 수입국 (수입금액 기준)',
+                            labels={'수입 금액': '수입금액 ($)'}
+                        )
+                        st.plotly_chart(fig_country_val, use_container_chart=True)
+                else:
+                    st.warning("선택한 HS코드에 대한 국가별 데이터가 없습니다.")
             else:
                 st.warning("선택한 HS코드에 대한 데이터가 존재하지 않아 대시보드를 표시할 수 없습니다.")
 
