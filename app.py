@@ -231,16 +231,26 @@ else:
                     {'검색량': 'mean'}
                 ).reset_index()
                 
-                # 최종 데이터 병합
+                # 최종 데이터 병합 (how='inner'를 'how='outer'로 변경)
                 st.session_state.df_combined = pd.merge(
                     df_imports_monthly, 
                     df_naver_monthly, 
                     left_on=df_imports_monthly['기간'].dt.strftime('%Y-%m'), 
                     right_on=df_naver_monthly['날짜'].dt.strftime('%Y-%m'),
-                    how='inner'
+                    how='outer'
                 )
-                st.session_state.df_combined.rename(columns={'key_0': '기간'}, inplace=True)
-                st.session_state.df_combined.drop(['날짜'], axis=1, inplace=True)
+                
+                # 병합 후 NaN 값 0으로 채우고 컬럼명 정리
+                st.session_state.df_combined.rename(columns={'key_0': '기간', '날짜': '네이버 날짜'}, inplace=True)
+                
+                # 기간 컬럼을 합치기
+                st.session_state.df_combined['기간'] = st.session_state.df_combined['기간'].fillna(st.session_state.df_combined['네이버 날짜'].dt.strftime('%Y-%m'))
+                st.session_state.df_combined.drop('네이버 날짜', axis=1, inplace=True)
+
+                st.session_state.df_combined['수입 중량'].fillna(0, inplace=True)
+                st.session_state.df_combined['수입 금액'].fillna(0, inplace=True)
+                st.session_state.df_combined['검색량'].fillna(0, inplace=True)
+
                 st.success("데이터 통합 완료!")
             except Exception as e:
                 st.error(f"데이터 통합 중 오류가 발생했습니다. 선택한 HS코드에 해당하는 데이터가 없거나, 업로드한 파일 형식을 확인해주세요: {e}")
@@ -262,8 +272,10 @@ else:
                     total_value = st.session_state.df_combined['수입 금액'].sum() / 1000000
                     st.metric("총 수입금액 (백만 $)", f"{total_value:,.2f}")
                 with col3:
-                    avg_unit_price = (st.session_state.df_combined['수입 금액'] / st.session_state.df_combined['수입 중량']).mean()
-                    st.metric("평균 단가 ($/kg)", f"{avg_unit_price:,.2f}")
+                    # '수입 중량'이 0인 경우를 방지
+                    valid_data = st.session_state.df_combined[st.session_state.df_combined['수입 중량'] > 0]
+                    avg_unit_price = (valid_data['수입 금액'] / valid_data['수입 중량']).mean()
+                    st.metric("평균 단가 ($/kg)", f"{avg_unit_price:,.2f}" if not pd.isna(avg_unit_price) else "N/A")
 
                 # 그래프: 수입량, 수입금액, 검색량
                 st.subheader("기간별 수입량 및 검색량 추이")
