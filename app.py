@@ -50,7 +50,7 @@ def get_google_sheet_client():
     실제 Streamlit Cloud 환경에서 secrets에 서비스 계정 JSON이 설정되어 있어야 함.
     """
     try:
-        credentials = service_account.Credentials.Credentials.from_service_account_info(
+        credentials = service_account.Credentials.from_service_account_info(
             st.secrets["gcp_service_account"],
             scopes=["https://www.googleapis.com/auth/spreadsheets"]
         )
