@@ -147,10 +147,16 @@ def load_data():
 
     if uploaded_naver:
         try:
+            # 네이버 데이터랩 CSV 파일은 첫 번째 행에 헤더가 있습니다.
             df = pd.read_csv(uploaded_naver, skiprows=6)
-            df.columns = ['날짜', '검색량']
-            # 검색량 컬럼을 숫자형으로 변환
+            
+            # '커피'라는 컬럼을 '검색량'으로 변경합니다.
+            if '커피' in df.columns:
+                df.rename(columns={'커피': '검색량'}, inplace=True)
+            
+            # 검색량 컬럼을 숫자형으로 변환합니다.
             df['검색량'] = pd.to_numeric(df['검색량'], errors='coerce')
+            
             st.session_state.df_naver = pd.concat([st.session_state.df_naver, df], ignore_index=True)
             st.sidebar.success("네이버 데이터랩 업로드 완료!")
         except Exception as e:
@@ -312,13 +318,28 @@ else:
 
                 # 그래프: 수입량, 수입금액, 검색량
                 st.subheader("기간별 수입량 및 검색량 추이")
+                
                 fig1 = px.line(
-                    st.session_state.df_combined, 
-                    x="기간", 
-                    y=["수입 중량", "검색량"], 
-                    labels={"value": "수량 / 검색량", "variable": "지표"},
-                    title="월별 수입량과 검색량 추이"
+                    st.session_state.df_combined,
+                    x="기간",
+                    y="수입 중량",
+                    title="월별 수입량과 검색량 추이",
+                    labels={"수입 중량": "수입량 (kg)"},
                 )
+
+                # 검색량을 두 번째 y축에 추가
+                fig1.add_trace(
+                    px.line(
+                        st.session_state.df_combined,
+                        x="기간",
+                        y="검색량",
+                    ).data[0],
+                    secondary_y=True,
+                )
+
+                # Y축 라벨 설정
+                fig1.update_yaxes(title_text="<b>수입량 (kg)</b>", secondary_y=False)
+                fig1.update_yaxes(title_text="<b>검색량</b>", secondary_y=True)
                 fig1.update_traces(hovertemplate="%{x|%Y-%m}<br>%{y:,.0f}")
                 st.plotly_chart(fig1, use_container_width=True)
 
