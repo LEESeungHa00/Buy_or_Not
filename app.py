@@ -106,6 +106,11 @@ uploaded_tds = st.sidebar.file_uploader("3. 트릿지 데이터 (.csv)", type="c
 def load_imports(uploaded_file):
     if uploaded_file:
         df = pd.read_csv(uploaded_file)
+        # 날짜 컬럼을 YYYY.MM 형식으로 통일
+        if '기간' not in df.columns:
+            if '년' in df.columns and '월' in df.columns:
+                df['기간'] = df['년'].astype(str) + '.' + df['월'].astype(str).str.zfill(2)
+        
         st.session_state.df_imports = pd.concat([st.session_state.df_imports, df], ignore_index=True)
         st.sidebar.success("관세청 데이터 업로드 완료!")
         write_to_google_sheet(df, "관세청")
@@ -125,7 +130,7 @@ def load_tds(uploaded_file):
     if uploaded_file:
         df = pd.read_csv(uploaded_file)
         st.session_state.df_tds = pd.concat([st.session_state.df_tds, df], ignore_index=True)
-        st.sidebar.success("트릿지 데이터 업로드 완료!")
+        st.sidebar.success("TDS 업로드 완료!")
         write_to_google_sheet(df, "TDS")
 
 load_imports(uploaded_imports)
@@ -137,8 +142,10 @@ if not st.session_state.df_imports.empty and not st.session_state.df_naver.empty
     with st.spinner('데이터를 통합하는 중입니다...'):
         try:
             # 날짜 형식 통일 및 인덱스 설정
-            st.session_state.df_imports['기간'] = pd.to_datetime(st.session_state.df_imports['기간'], format='%Y.%m')
-            st.session_state.df_naver['날짜'] = pd.to_datetime(st.session_state.df_naver['날짜'])
+            st.session_state.df_imports['기간'] = pd.to_datetime(st.session_state.df_imports['기간'], format='%Y.%m', errors='coerce')
+            st.session_state.df_imports.dropna(subset=['기간'], inplace=True)
+            st.session_state.df_naver['날짜'] = pd.to_datetime(st.session_state.df_naver['날짜'], errors='coerce')
+            st.session_state.df_naver.dropna(subset=['날짜'], inplace=True)
 
             # 월별로 데이터를 그룹화하여 병합
             df_imports_monthly = st.session_state.df_imports.groupby(
@@ -305,7 +312,7 @@ with tab4:
     st.header("원본 데이터")
     st.subheader("관세청 데이터")
     st.dataframe(st.session_state.df_imports, use_container_width=True)
-    st.subheader("네이버 데이터랩 데이터")
+    st.subheader("네이버 데이터랩 검색량")
     st.dataframe(st.session_state.df_naver, use_container_width=True)
-    st.subheader("트릿지 데이터")
+    st.subheader("TDS")
     st.dataframe(st.session_state.df_tds, use_container_width=True)
