@@ -26,6 +26,8 @@ if 'df_tds' not in st.session_state:
     st.session_state.df_tds = pd.DataFrame()
 if 'df_combined' not in st.session_state:
     st.session_state.df_combined = pd.DataFrame()
+if 'selected_hscodes' not in st.session_state:
+    st.session_state.selected_hscodes = []
 
 st.title("🧭 Compass - Data-Driven Direction")
 
@@ -73,7 +75,10 @@ def read_google_sheet(sheet_name):
             # 네이버 데이터랩 시트일 경우, '커피' 컬럼 이름을 '검색량'으로 변경
             if sheet_name == '네이버 데이터랩' and '커피' in df.columns:
                 df.rename(columns={'커피': '검색량'}, inplace=True)
-                
+            
+            # TDS 시트일 경우, 'Detailed HS-CODE' 컬럼명을 'HS코드'로 변경
+            if sheet_name == 'TDS' and 'Detailed HS-CODE' in df.columns:
+                df.rename(columns={'Detailed HS-CODE': 'HS코드'}, inplace=True)
             return df
         except Exception as e:
             st.error(f"'{sheet_name}' 워크시트 읽기 오류: {e}")
@@ -99,13 +104,6 @@ def write_to_google_sheet(df, sheet_name):
             st.error(f"'{sheet_name}' 워크시트 쓰기 오류: {e}")
 
 # -----------------
-# 앱 시작 시 데이터 로드
-# -----------------
-st.session_state.df_imports = read_google_sheet("관세청")
-st.session_state.df_naver = read_google_sheet("네이버 데이터랩")
-st.session_state.df_tds = read_google_sheet("TDS")
-
-# -----------------
 # 파일 업로드 및 데이터 처리
 # -----------------
 st.sidebar.header("데이터 업로드 및 가져오기")
@@ -116,14 +114,13 @@ uploaded_tds = st.sidebar.file_uploader("3. 트릿지 데이터 (.csv)", type="c
 def load_imports(uploaded_file):
     if uploaded_file:
         df = pd.read_csv(uploaded_file)
-        # 날짜 컬럼을 YYYY.MM 형식으로 통일
         if '기간' not in df.columns:
             if '년' in df.columns and '월' in df.columns:
                 df['기간'] = df['년'].astype(str) + '.' + df['월'].astype(str).str.zfill(2)
         
         st.session_state.df_imports = pd.concat([st.session_state.df_imports, df], ignore_index=True)
         st.sidebar.success("관세청 데이터 업로드 완료!")
-        write_to_google_sheet(df, "관세청")
+        # write_to_google_sheet(df, "관세청")
 
 def load_naver(uploaded_file):
     if uploaded_file:
@@ -132,7 +129,7 @@ def load_naver(uploaded_file):
             df.columns = ['날짜', '검색량']
             st.session_state.df_naver = pd.concat([st.session_state.df_naver, df], ignore_index=True)
             st.sidebar.success("네이버 데이터랩 업로드 완료!")
-            write_to_google_sheet(df, "네이버 데이터랩")
+            # write_to_google_sheet(df, "네이버 데이터랩")
         except Exception as e:
             st.sidebar.error(f"네이버 데이터랩 CSV 파일 형식이 올바르지 않습니다: {e}")
 
@@ -141,37 +138,71 @@ def load_tds(uploaded_file):
         df = pd.read_csv(uploaded_file)
         st.session_state.df_tds = pd.concat([st.session_state.df_tds, df], ignore_index=True)
         st.sidebar.success("TDS 업로드 완료!")
-        write_to_google_sheet(df, "TDS")
+        # write_to_google_sheet(df, "TDS")
 
-load_imports(uploaded_imports)
-load_naver(uploaded_naver)
-load_tds(uploaded_tds)
+if st.sidebar.button("데이터 업로드 실행"):
+    if uploaded_imports: load_imports(uploaded_imports)
+    if uploaded_naver: load_naver(uploaded_naver)
+    if uploaded_tds: load_tds(uploaded_tds)
 
-# 데이터 결합
-if not st.session_state.df_imports.empty and not st.session_state.df_naver.empty:
+# 앱 시작 시 데이터 로드
+if st.sidebar.button("구글 시트에서 데이터 가져오기"):
+    st.session_state.df_imports = read_google_sheet("관세청")
+    st.session_state.df_naver = read_google_sheet("네이버 데이터랩")
+    st.session_state.df_tds = read_google_sheet("TDS")
+    if not st.session_state.df_imports.empty: st.sidebar.success("관세청 데이터 불러오기 완료!")
+    if not st.session_state.df_naver.empty: st.sidebar.success("네이버 데이터랩 데이터 불러오기 완료!")
+    if not st.session_state.df_tds.empty: st.sidebar.success("TDS 데이터 불러오기 완료!")
+
+# HS코드 선택 기능
+if not st.session_state.df_imports.empty and not st.session_state.df_tds.empty:
+    all_hscodes = pd.concat([
+        st.session_state.df_imports[['HS코드', '품목명']],
+        st.session_state.df_tds[['HS코드', 'Product Description']]
+    ]).drop_duplicates().sort_values(by='HS코드').reset_index(drop=True)
+    
+    # 'Product Description' 컬럼명을 '품목명'으로 통일
+    if 'Product Description' in all_hscodes.columns:
+        all_hscodes.rename(columns={'Product Description': '품목명'}, inplace=True)
+    
+    all_hscodes = all_hscodes.drop_duplicates(subset=['HS코드'])
+    
+    hscode_options = [f"{row['HS코드']} - {row['품목명']}" for index, row in all_hscodes.iterrows()]
+    st.session_state.selected_hscodes = st.sidebar.multiselect(
+        "분석할 HS코드를 선택하세요",
+        options=hscode_options,
+        default=hscode_options[:2] if len(hscode_options) > 1 else hscode_options
+    )
+
+    selected_codes = [s.split(' - ')[0] for s in st.session_state.selected_hscodes]
+
+    # 데이터 결합
     with st.spinner('데이터를 통합하는 중입니다...'):
         try:
-            # 날짜 형식 통일 및 인덱스 설정
-            st.session_state.df_imports['기간'] = pd.to_datetime(st.session_state.df_imports['기간'], format='%Y.%m', errors='coerce')
-            st.session_state.df_imports.dropna(subset=['기간'], inplace=True)
-            st.session_state.df_naver['날짜'] = pd.to_datetime(st.session_state.df_naver['날짜'], errors='coerce')
-            st.session_state.df_naver.dropna(subset=['날짜'], inplace=True)
-
-            # 월별로 데이터를 그룹화하여 병합
-            df_imports_monthly = st.session_state.df_imports.groupby(
+            # 관세청 데이터 필터링 및 전처리
+            df_imports_filtered = st.session_state.df_imports[
+                st.session_state.df_imports['HS코드'].astype(str).isin(selected_codes)
+            ].copy()
+            df_imports_filtered['기간'] = pd.to_datetime(df_imports_filtered['기간'], format='%Y.%m', errors='coerce')
+            df_imports_filtered.dropna(subset=['기간'], inplace=True)
+            df_imports_monthly = df_imports_filtered.groupby(
                 pd.Grouper(key='기간', freq='M')
             ).agg({
                 '수입 중량': 'sum',
                 '수입 금액': 'sum'
             }).reset_index()
 
-            df_naver_monthly = st.session_state.df_naver.groupby(
+            # 네이버 데이터랩 데이터 전처리
+            df_naver_monthly = st.session_state.df_naver.copy()
+            df_naver_monthly['날짜'] = pd.to_datetime(df_naver_monthly['날짜'], errors='coerce')
+            df_naver_monthly.dropna(subset=['날짜'], inplace=True)
+            df_naver_monthly = df_naver_monthly.groupby(
                 pd.Grouper(key='날짜', freq='M')
             ).agg(
                 {'검색량': 'mean'}
             ).reset_index()
             
-            # 월별 데이터 병합
+            # 최종 데이터 병합
             st.session_state.df_combined = pd.merge(
                 df_imports_monthly, 
                 df_naver_monthly, 
@@ -180,11 +211,10 @@ if not st.session_state.df_imports.empty and not st.session_state.df_naver.empty
                 how='inner'
             )
             st.session_state.df_combined.rename(columns={'key_0': '기간'}, inplace=True)
-            st.session_state.df_combined.drop(['기간_y'], axis=1, inplace=True)
-            st.session_state.df_combined.rename(columns={'기간_x': '기간'}, inplace=True)
+            st.session_state.df_combined.drop(['날짜'], axis=1, inplace=True)
             st.success("데이터 통합 완료!")
         except Exception as e:
-            st.error(f"데이터 통합 중 오류가 발생했습니다. 업로드한 파일 형식을 확인해주세요: {e}")
+            st.error(f"데이터 통합 중 오류가 발생했습니다. 선택한 HS코드에 해당하는 데이터가 없거나, 업로드한 파일 형식을 확인해주세요: {e}")
 
 # -----------------
 # 탭 구성
@@ -197,13 +227,13 @@ with tab1:
         # KPI 지표
         col1, col2, col3 = st.columns(3)
         with col1:
-            total_volume = st.session_state.df_imports['수입 중량'].sum() / 1000000
+            total_volume = st.session_state.df_combined['수입 중량'].sum() / 1000000
             st.metric("총 수입량 (백만 kg)", f"{total_volume:,.2f}")
         with col2:
-            total_value = st.session_state.df_imports['수입 금액'].sum() / 1000000
+            total_value = st.session_state.df_combined['수입 금액'].sum() / 1000000
             st.metric("총 수입금액 (백만 $)", f"{total_value:,.2f}")
         with col3:
-            avg_unit_price = (st.session_state.df_imports['수입 금액'] / st.session_state.df_imports['수입 중량']).mean()
+            avg_unit_price = (st.session_state.df_combined['수입 금액'] / st.session_state.df_combined['수입 중량']).mean()
             st.metric("평균 단가 ($/kg)", f"{avg_unit_price:,.2f}")
 
         # 그래프: 수입량, 수입금액, 검색량
@@ -220,10 +250,23 @@ with tab1:
 
         # 국가별 수입량/금액 그래프
         st.subheader("국가별 수입량 및 금액")
-        df_country = st.session_state.df_imports.groupby('국가').agg({
+        df_country = st.session_state.df_imports[
+             st.session_state.df_imports['HS코드'].astype(str).isin(selected_codes)
+        ].groupby('국가').agg({
             '수입 중량': 'sum',
             '수입 금액': 'sum'
         }).reset_index().sort_values(by='수입 중량', ascending=False)
+        
+        # TDS 데이터도 국가별 분석에 포함
+        df_tds_country = st.session_state.df_tds[
+             st.session_state.df_tds['HS코드'].astype(str).isin(selected_codes)
+        ].groupby('Origin Country').agg({
+            'Volume': 'sum',
+            'Value': 'sum'
+        }).reset_index().rename(columns={'Origin Country': '국가', 'Volume': '수입 중량', 'Value': '수입 금액'})
+        
+        df_country = pd.concat([df_country, df_tds_country]).groupby('국가').sum().reset_index()
+        df_country = df_country.sort_values(by='수입 중량', ascending=False)
 
         col1_bar, col2_bar = st.columns(2)
         with col1_bar:
@@ -245,7 +288,7 @@ with tab1:
             )
             st.plotly_chart(fig_country_val, use_container_width=True)
     else:
-        st.warning("데이터를 업로드하거나 구글 시트에서 읽어와 대시보드를 활성화하세요.")
+        st.warning("데이터를 업로드하거나 구글 시트에서 읽어와 대시보드를 활성화하세요. HS코드를 선택해주세요.")
 
 with tab2:
     st.header("수요/가격 예측 모델 (간단한 회귀 모델)")
@@ -256,36 +299,39 @@ with tab2:
         df_model['검색량_lag1'] = df_model['검색량'].shift(1)
         df_model.dropna(inplace=True)
 
-        # 모델 학습 (예측)
-        model = LinearRegression()
-        X = df_model[['검색량_lag1']]
-        y = df_model['수입 중량']
-        
-        model.fit(X, y)
-        df_model['예측 수입 중량'] = model.predict(X)
-        
-        st.write("---")
-        st.subheader("미래 수입량 예측")
-        
-        # 마지막 달의 검색량을 기반으로 다음 달 수입량 예측
-        last_search_volume = df_model['검색량'].iloc[-1]
-        predicted_volume = model.predict([[last_search_volume]])[0]
-        
-        st.success(f"다음 달 예상 수입량은 **{predicted_volume:,.0f} kg** 입니다.")
-        st.info("💡 **전략 인사이트**: 검색량이 수입량으로 이어지는 경향이 있습니다. 검색량 추이를 지속적으로 모니터링하여 미리 물량을 확보하세요.")
-
-        st.subheader("예측 모델 결과 시각화")
-        fig_pred = px.line(
-            df_model, 
-            x='기간', 
-            y=['수입 중량', '예측 수입 중량'],
-            title='실제 수입량 vs. 예측 수입량',
-            labels={'value': '수입량 (kg)', 'variable': '지표'}
-        )
-        fig_pred.update_traces(hovertemplate="%{x|%Y-%m}<br>%{y:,.0f}")
-        st.plotly_chart(fig_pred, use_container_width=True)
+        if not df_model.empty:
+            # 모델 학습 (예측)
+            model = LinearRegression()
+            X = df_model[['검색량_lag1']]
+            y = df_model['수입 중량']
+            
+            model.fit(X, y)
+            df_model['예측 수입 중량'] = model.predict(X)
+            
+            st.write("---")
+            st.subheader("미래 수입량 예측")
+            
+            # 마지막 달의 검색량을 기반으로 다음 달 수입량 예측
+            last_search_volume = df_model['검색량'].iloc[-1]
+            predicted_volume = model.predict([[last_search_volume]])[0]
+            
+            st.success(f"다음 달 예상 수입량은 **{predicted_volume:,.0f} kg** 입니다.")
+            st.info("💡 **전략 인사이트**: 검색량이 수입량으로 이어지는 경향이 있습니다. 검색량 추이를 지속적으로 모니터링하여 미리 물량을 확보하세요.")
+    
+            st.subheader("예측 모델 결과 시각화")
+            fig_pred = px.line(
+                df_model, 
+                x='기간', 
+                y=['수입 중량', '예측 수입 중량'],
+                title='실제 수입량 vs. 예측 수입량',
+                labels={'value': '수입량 (kg)', 'variable': '지표'}
+            )
+            fig_pred.update_traces(hovertemplate="%{x|%Y-%m}<br>%{y:,.0f}")
+            st.plotly_chart(fig_pred, use_container_width=True)
+        else:
+            st.warning("데이터가 너무 적어 예측 모델을 실행할 수 없습니다. 더 많은 데이터를 업로드해주세요.")
     else:
-        st.warning("데이터를 업로드하거나 구글 시트에서 읽어와 예측 모델을 활성화하세요.")
+        st.warning("데이터를 업로드하거나 구글 시트에서 읽어와 예측 모델을 활성화하세요. HS코드를 선택해주세요.")
 
 with tab3:
     st.header("데이터 상관관계 분석")
@@ -316,7 +362,7 @@ with tab3:
 
         st.info("💡 **인사이트**: 검색량과 수입량 간의 양의 상관관계가 보인다면, 검색량 증가는 미래의 수요 증가를 시사합니다. 이를 통해 수입 물량 결정에 참고할 수 있습니다.")
     else:
-        st.warning("데이터를 업로드하거나 구글 시트에서 읽어와 상관관계 분석을 활성화하세요.")
+        st.warning("데이터를 업로드하거나 구글 시트에서 읽어와 상관관계 분석을 활성화하세요. HS코드를 선택해주세요.")
 
 with tab4:
     st.header("원본 데이터")
@@ -324,6 +370,5 @@ with tab4:
     st.dataframe(st.session_state.df_imports, use_container_width=True)
     st.subheader("네이버 데이터랩 검색량")
     st.dataframe(st.session_state.df_naver, use_container_width=True)
-    st.subheader("TDS")
+    st.subheader("TDS 데이터")
     st.dataframe(st.session_state.df_tds, use_container_width=True)
- 
