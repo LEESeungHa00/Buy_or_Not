@@ -75,8 +75,18 @@ def read_google_sheet(sheet_name):
             if not all_data:
                 return pd.DataFrame()
             
-            # 첫 번째 행을 헤더로 사용하고 나머지 데이터를 DataFrame으로 변환
+            # 헤더에 빈 문자열이 있는 경우 고유한 이름으로 변경
             headers = all_data[0]
+            seen = {}
+            for i, header in enumerate(headers):
+                if not header:
+                    headers[i] = f'Unnamed_{i}'
+                elif header in seen:
+                    headers[i] = f'{header}_{seen[header]}'
+                    seen[header] += 1
+                else:
+                    seen[header] = 1
+
             data = all_data[1:]
             df = pd.DataFrame(data, columns=headers)
             
@@ -125,6 +135,20 @@ def load_data():
     if uploaded_tds:
         try:
             df = pd.read_csv(uploaded_tds)
+            
+            # CSV 파일 업로드 시에도 헤더에 빈 문자열이 있는 경우 고유한 이름으로 변경
+            headers = df.columns.tolist()
+            seen = {}
+            for i, header in enumerate(headers):
+                if not header:
+                    headers[i] = f'Unnamed_{i}'
+                elif header in seen:
+                    headers[i] = f'{header}_{seen[header]}'
+                    seen[header] += 1
+                else:
+                    seen[header] = 1
+            df.columns = headers
+
             st.session_state.df_tds = pd.concat([st.session_state.df_tds, df], ignore_index=True)
             st.sidebar.success("TDS 업로드 완료!")
         except Exception as e:
