@@ -7,6 +7,8 @@ from plotly.subplots import make_subplots
 import statsmodels.api as sm
 import io
 from datetime import datetime, timedelta
+from bs4 import BeautifulSoup
+import re
 
 # 구글 시트 API 연동을 위한 라이브러리
 import gspread
@@ -30,6 +32,8 @@ if 'df_combined' not in st.session_state:
     st.session_state.df_combined = pd.DataFrame()
 if 'selected_hscodes' not in st.session_state:
     st.session_state.selected_hscodes = []
+if 'top_countries' not in st.session_state:
+    st.session_state.top_countries = []
 
 st.title("🧭 Compass : Data-Driven Direction")
 
@@ -214,28 +218,24 @@ if st.sidebar.button("데이터 업로드 및 가져오기"):
 if st.session_state.df_imports.empty or st.session_state.df_tds.empty or st.session_state.df_naver.empty:
     st.warning("분석을 시작하려면 먼저 사이드바에서 **데이터 업로드 및 가져오기** 버튼을 눌러주세요.")
 else:
-    # HS코드 목록 생성 및 전처리
-    df_imports_hscodes = st.session_state.df_imports[
-        (st.session_state.df_imports['수입 중량'] > 0) & 
-        (st.session_state.df_imports['국가'].notna())
-    ].rename(columns={'국가': 'Origin Country', '수입 중량': 'Volume', '수입 금액': 'Value'})
+    # 관세청과 TDS 데이터 통합 (유효한 HS코드만)
+    df_combined_imports_tds = pd.concat([
+        st.session_state.df_imports.rename(columns={'국가': 'Origin Country', '수입 중량': 'Volume', '수입 금액': 'Value'}),
+        st.session_state.df_tds.rename(columns={'Product Description': '품목명'})
+    ], ignore_index=True)
     
-    df_tds_hscodes = st.session_state.df_tds[
-        (st.session_state.df_tds['Volume'] > 0) &
-        (st.session_state.df_tds['Origin Country'].notna())
-    ]
-    
-    # 두 데이터프레임의 유효한 HS코드만 합치고 중복 제거
-    all_hscodes_valid_data = pd.concat([
-        df_imports_hscodes[['HS코드', '품목명']].dropna(), 
-        df_tds_hscodes[['HS코드', 'Product Description']].rename(columns={'Product Description': '품목명'}).dropna()
-    ]).drop_duplicates(subset='HS코드').sort_values(by='HS코드').reset_index(drop=True)
-    
-    # 10자리 숫자 HS코드만 필터링
-    all_hscodes_valid_data = all_hscodes_valid_data[all_hscodes_valid_data['HS코드'].str.strip().str.len() == 10]
-    all_hscodes_valid_data['display_name'] = all_hscodes_valid_data['HS코드'].astype(str) + ' - ' + all_hscodes_valid_data['품목명']
-    
-    hscode_options = all_hscodes_valid_data['display_name'].tolist()
+    # 유효한 수입 중량, 금액, HS코드, 국가 데이터만 남기기
+    df_combined_imports_tds = df_combined_imports_tds[
+        (df_combined_imports_tds['Volume'] > 0) &
+        (df_combined_imports_tds['Value'] > 0) &
+        (df_combined_imports_tds['HS코드'].notna()) &
+        (df_combined_imports_tds['Origin Country'].notna())
+    ].copy()
+
+    # HS코드 목록 생성
+    all_hscodes = df_combined_imports_tds[['HS코드', '품목명']].dropna().drop_duplicates(subset='HS코드').sort_values(by='HS코드').reset_index(drop=True)
+    all_hscodes['display_name'] = all_hscodes['HS코드'].astype(str) + ' - ' + all_hscodes['품목명']
+    hscode_options = all_hscodes['display_name'].tolist()
 
     st.session_state.selected_hscodes = st.sidebar.multiselect(
         "분석할 HS코드를 선택하세요",
@@ -248,9 +248,13 @@ else:
     if not selected_codes:
         st.warning("분석을 위해 최소 하나 이상의 HS코드를 선택해야 합니다.")
     else:
+        df_filtered = df_combined_imports_tds[
+            df_combined_imports_tds['HS코드'].astype(str).isin(selected_codes)
+        ].copy()
+
         # 기간 선택 슬라이더
-        min_date_ts = pd.to_datetime('2020-01-01')
-        max_date_ts = pd.to_datetime(datetime.now())
+        min_date_ts = pd.to_datetime(df_filtered['Date'].min())
+        max_date_ts = pd.to_datetime(df_filtered['Date'].max())
         start_date, end_date = st.sidebar.slider(
             "분석 기간을 선택하세요",
             min_value=min_date_ts.to_pydatetime(),
@@ -261,22 +265,16 @@ else:
         
         with st.spinner('데이터를 통합하는 중입니다...'):
             try:
-                # 관세청과 TDS 데이터 통합 (유효한 HS코드만)
-                df_combined_imports_tds = pd.concat([df_imports_hscodes, df_tds_hscodes], ignore_index=True)
-                df_combined_imports_tds = df_combined_imports_tds[
-                    df_combined_imports_tds['HS코드'].astype(str).isin(selected_codes)
-                ].copy()
-                
                 # 기간 필터링
-                df_combined_imports_tds['Date'] = pd.to_datetime(df_combined_imports_tds['Date'], errors='coerce')
-                df_combined_imports_tds.dropna(subset=['Date'], inplace=True)
-                df_combined_imports_tds = df_combined_imports_tds[
-                    (df_combined_imports_tds['Date'] >= pd.Timestamp(start_date)) & 
-                    (df_combined_imports_tds['Date'] <= pd.Timestamp(end_date))
+                df_filtered['Date'] = pd.to_datetime(df_filtered['Date'], errors='coerce')
+                df_filtered.dropna(subset=['Date'], inplace=True)
+                df_filtered = df_filtered[
+                    (df_filtered['Date'] >= pd.Timestamp(start_date)) & 
+                    (df_filtered['Date'] <= pd.Timestamp(end_date))
                 ]
                 
                 # 월별로 데이터 그룹화
-                df_combined_monthly = df_combined_imports_tds.groupby(
+                df_combined_monthly = df_filtered.groupby(
                     pd.Grouper(key='Date', freq='M')
                 ).agg({
                     'Volume': 'sum',
@@ -318,17 +316,16 @@ else:
                 st.session_state.df_combined = df_combined
                 st.success("데이터 통합 완료!")
             except Exception as e:
-                st.error(f"데이터 통합 중 오류가 발생했습니다. 선택한 HS코드에 해당하는 데이터가 없거나, 업로드한 파일 형식을 확인해주세요: {e}")
+                st.error(f"데이터 통합 중 오류가 발생했습니다. 업로드한 파일 형식을 확인해주세요: {e}")
 
         # -----------------
         # 탭 구성
         # -----------------
-        tab1, tab2, tab3, tab4 = st.tabs(["📊 대시보드", "🔮 예측 모델", "📈 상관관계 분석", "🗃️ 원본 데이터"])
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 대시보드", "🔮 예측 모델", "📈 상관관계 분석", "🗺️ 공급망 분석", "🗃️ 원본 데이터"])
 
         with tab1:
             st.header("커피 원두 시장 동향 분석")
-            # 데이터 개수 표시
-            total_filtered_rows = df_combined_imports_tds.shape[0]
+            total_filtered_rows = df_filtered.shape[0]
             st.info(f"선택한 HS코드에 대한 총 데이터 행: {total_filtered_rows}개")
 
             if not st.session_state.df_combined.empty and not st.session_state.df_combined['수입 중량'].sum() == 0:
@@ -341,8 +338,8 @@ else:
                     total_value = st.session_state.df_combined['수입 금액'].sum() / 1000000
                     st.metric("총 수입금액 (백만 $)", f"{total_value:,.2f}")
                 with col3:
-                    valid_data = st.session_state.df_combined[st.session_state.df_combined['수입 중량'] > 0]
-                    avg_unit_price = (valid_data['수입 금액'] / valid_data['수입 중량']).mean()
+                    valid_data = df_filtered[df_filtered['Volume'] > 0]
+                    avg_unit_price = (valid_data['Value'] / valid_data['Volume']).mean()
                     st.metric("평균 단가 ($/kg)", f"{avg_unit_price:,.2f}" if not pd.isna(avg_unit_price) else "N/A")
 
                 # 그래프: 수입량, 수입금액, 검색량
@@ -393,15 +390,16 @@ else:
                 # -------------------------
                 st.subheader("원산지별 가격 경쟁력 및 공급 안정성 분석")
                 
-                # TDS와 관세청 데이터 통합
-                df_country_analysis = df_combined_imports_tds.copy()
-                df_country_analysis.rename(columns={'Volume': '수입 중량', 'Value': '수입 금액'}, inplace=True)
-                df_country_analysis['단가'] = df_country_analysis['수입 금액'] / df_country_analysis['수입 중량']
+                # 상위 10개 국가만 추출
+                top_10_countries = df_filtered.groupby('Origin Country')['Volume'].sum().nlargest(10).index.tolist()
+                df_country_analysis = df_filtered[df_filtered['Origin Country'].isin(top_10_countries)].copy()
+                df_country_analysis['단가'] = df_country_analysis['Value'] / df_country_analysis['Volume']
                 df_country_analysis.dropna(subset=['단가', 'Origin Country'], inplace=True)
                 
-                # 상위 10개 국가만 추출
-                top_10_countries = df_country_analysis.groupby('Origin Country')['수입 중량'].sum().nlargest(10).index
-                df_country_analysis = df_country_analysis[df_country_analysis['Origin Country'].isin(top_10_countries)]
+                # TDS 데이터의 경우, exporter와 importer 컬럼을 가져오고, 관세청 데이터에는 해당 컬럼이 없으므로 빈 문자열로 채움
+                if 'Exporter' in df_filtered.columns and 'Importer' in df_filtered.columns:
+                    df_filtered['Exporter'].fillna('', inplace=True)
+                    df_filtered['Importer'].fillna('', inplace=True)
 
                 if not df_country_analysis.empty:
                     col_price, col_stability = st.columns(2)
@@ -421,8 +419,8 @@ else:
 
                     with col_stability:
                         # 공급 안정성 (수입 중량 변동성)
-                        monthly_volume = df_country_analysis.groupby([pd.Grouper(key='Date', freq='M'), 'Origin Country'])['수입 중량'].sum().reset_index()
-                        stability = monthly_volume.groupby('Origin Country')['수입 중량'].std().reset_index().rename(columns={'수입 중량': '변동성'})
+                        monthly_volume = df_country_analysis.groupby([pd.Grouper(key='Date', freq='M'), 'Origin Country'])['Volume'].sum().reset_index()
+                        stability = monthly_volume.groupby('Origin Country')['Volume'].std().reset_index().rename(columns={'Volume': '변동성'})
                         stability = stability.sort_values(by='변동성', ascending=True)
                         fig_stability = px.bar(
                             stability.head(10),
@@ -439,7 +437,7 @@ else:
                 st.subheader("국가별 수입량 및 금액")
                 
                 # 상위 10개 국가 데이터만 추출
-                df_country_filtered = df_combined_imports_tds[df_combined_imports_tds['Origin Country'].isin(top_10_countries)]
+                df_country_filtered = df_filtered[df_filtered['Origin Country'].isin(top_10_countries)]
                 
                 df_country = df_country_filtered.groupby('Origin Country').agg({
                     'Volume': 'sum',
@@ -593,6 +591,122 @@ else:
                 st.warning("선택한 HS코드에 대한 데이터가 존재하지 않아 상관관계 분석을 활성화할 수 없습니다.")
 
         with tab4:
+            st.header("공급망 분석")
+            
+            if not df_filtered.empty:
+                col1, col2 = st.columns(2)
+                with col1:
+                    # 국가별 수입량 비중 (파이 차트)
+                    st.subheader("원산지별 수입량 비중")
+                    df_pie = df_filtered.groupby('Origin Country')['Volume'].sum().reset_index()
+                    fig_pie = px.pie(
+                        df_pie, 
+                        values='Volume', 
+                        names='Origin Country', 
+                        title='총 수입 중량 비중',
+                        labels={'Volume': '수입 중량'}
+                    )
+                    st.plotly_chart(fig_pie, use_container_width=True)
+
+                with col2:
+                    # 상위 2개국 수입량 추이
+                    st.subheader("핵심 원산지 수입량 추이")
+                    top_2_countries = df_filtered.groupby('Origin Country')['Volume'].sum().nlargest(2).index.tolist()
+                    if len(top_2_countries) > 1:
+                        df_top2 = df_filtered[df_filtered['Origin Country'].isin(top_2_countries)].copy()
+                        df_top2_monthly = df_top2.groupby([
+                            pd.Grouper(key='Date', freq='M'), 'Origin Country'
+                        ])['Volume'].sum().reset_index()
+                        
+                        fig_top2 = px.line(
+                            df_top2_monthly, 
+                            x='Date', 
+                            y='Volume', 
+                            color='Origin Country',
+                            title=f"{top_2_countries[0]} vs. {top_2_countries[1]} 수입량 추이",
+                            labels={'Volume': '수입 중량 (kg)', 'Date': '기간'}
+                        )
+                        st.plotly_chart(fig_top2, use_container_width=True)
+                    else:
+                        st.warning("분석할 상위 2개 국가 데이터가 충분하지 않습니다.")
+                
+                # 수입/수출업체 분석
+                st.subheader("수입/수출업체 현황 분석")
+                
+                if 'Raw Importer Name' in df_filtered.columns and 'Exporter' in df_filtered.columns:
+                    col_importer, col_exporter = st.columns(2)
+                    
+                    with col_importer:
+                        st.markdown("### 주요 수입업체")
+                        importers_by_volume = df_filtered.groupby('Raw Importer Name')['Volume'].sum().nlargest(10).reset_index()
+                        fig_importer = px.bar(
+                            importers_by_volume,
+                            x='Raw Importer Name',
+                            y='Volume',
+                            title='수입량 기준 상위 10개 수입업체',
+                            labels={'Raw Importer Name': '수입업체', 'Volume': '수입 중량 (kg)'}
+                        )
+                        st.plotly_chart(fig_importer, use_container_width=True)
+
+                    with col_exporter:
+                        st.markdown("### 주요 수출업체")
+                        exporters_by_volume = df_filtered.groupby('Exporter')['Volume'].sum().nlargest(10).reset_index()
+                        fig_exporter = px.bar(
+                            exporters_by_volume,
+                            x='Exporter',
+                            y='Volume',
+                            title='수입량 기준 상위 10개 수출업체',
+                            labels={'Exporter': '수출업체', 'Volume': '수입 중량 (kg)'}
+                        )
+                        st.plotly_chart(fig_exporter, use_container_width=True)
+
+                    # 특정 원산지 선택 시 업체 현황
+                    st.subheader("특정 원산지별 업체 분석")
+                    
+                    all_countries = df_filtered['Origin Country'].dropna().unique().tolist()
+                    selected_country_importer = st.selectbox(
+                        "업체 현황을 분석할 원산지를 선택하세요",
+                        options=all_countries
+                    )
+                    
+                    if selected_country_importer:
+                        df_country_importers = df_filtered[df_filtered['Origin Country'] == selected_country_importer].copy()
+                        df_importers_ranked = df_country_importers.groupby('Raw Importer Name')['Volume'].sum().nlargest(10).reset_index()
+                        
+                        st.markdown(f"**{selected_country_importer}에서 가장 많이 수입하는 업체**")
+                        fig_country_importers = px.bar(
+                            df_importers_ranked,
+                            x='Raw Importer Name',
+                            y='Volume',
+                            title=f"{selected_country_importer} 수입량 기준 상위 10개 업체",
+                            labels={'Raw Importer Name': '수입업체', 'Volume': '수입 중량 (kg)'}
+                        )
+                        st.plotly_chart(fig_country_importers, use_container_width=True)
+
+                        # 이 나라에서 안 가져오는 업체
+                        all_importers = df_filtered['Raw Importer Name'].dropna().unique().tolist()
+                        country_importers = df_country_importers['Raw Importer Name'].dropna().unique().tolist()
+                        other_importers = [imp for imp in all_importers if imp not in country_importers]
+                        
+                        df_other_importers = df_filtered[df_filtered['Raw Importer Name'].isin(other_importers)].copy()
+                        df_other_importers_ranked = df_other_importers.groupby('Raw Importer Name')['Volume'].sum().nlargest(10).reset_index()
+
+                        st.markdown(f"**{selected_country_importer} 외 다른 국가에서 많이 수입하는 업체**")
+                        fig_other_importers = px.bar(
+                            df_other_importers_ranked,
+                            x='Raw Importer Name',
+                            y='Volume',
+                            title=f"{selected_country_importer} 외 수입량 기준 상위 10개 업체",
+                            labels={'Raw Importer Name': '수입업체', 'Volume': '수입 중량 (kg)'}
+                        )
+                        st.plotly_chart(fig_other_importers, use_container_width=True)
+
+                else:
+                    st.warning("TDS 데이터에 '수출업체' 또는 '수입업체' 정보가 없어 분석할 수 없습니다.")
+            else:
+                st.warning("선택한 HS코드에 대한 데이터가 존재하지 않아 공급망 분석을 활성화할 수 없습니다.")
+
+        with tab5:
             st.header("원본 데이터")
             st.subheader("관세청 데이터")
             st.dataframe(st.session_state.df_imports, use_container_width=True)
