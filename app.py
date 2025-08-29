@@ -211,7 +211,7 @@ else:
     df_tds_hscodes = st.session_state.df_tds.rename(columns={'Product Description': '품목명'})[['HS코드', '품목명']].dropna()
     
     all_hscodes = pd.concat([df_imports_hscodes, df_tds_hscodes]).drop_duplicates(subset='HS코드').sort_values(by='HS코드').reset_index(drop=True)
-    all_hscodes = all_hscodes[all_hscodes['HS코드'].str.strip() != '']
+    all_hscodes = all_hscodes[all_hscodes['HS코드'].str.strip().str.len() == 10]
     all_hscodes['display_name'] = all_hscodes['HS코드'].astype(str) + ' - ' + all_hscodes['품목명']
     
     hscode_options = all_hscodes['display_name'].tolist()
