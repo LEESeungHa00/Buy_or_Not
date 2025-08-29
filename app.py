@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from sklearn.linear_model import LinearRegression
 import io
 from datetime import datetime, timedelta
@@ -319,28 +321,44 @@ else:
                 # 그래프: 수입량, 수입금액, 검색량
                 st.subheader("기간별 수입량 및 검색량 추이")
                 
-                fig1 = px.line(
-                    st.session_state.df_combined,
-                    x="기간",
-                    y="수입 중량",
-                    title="월별 수입량과 검색량 추이",
-                    labels={"수입 중량": "수입량 (kg)"},
+                fig1 = make_subplots(specs=[[{"secondary_y": True}]])
+
+                # 수입량 그래프
+                fig1.add_trace(
+                    go.Scatter(
+                        x=st.session_state.df_combined['기간'], 
+                        y=st.session_state.df_combined['수입 중량'], 
+                        name='수입 중량'
+                    ),
+                    secondary_y=False,
                 )
 
-                # 검색량을 두 번째 y축에 추가
+                # 검색량 그래프
                 fig1.add_trace(
-                    px.line(
-                        st.session_state.df_combined,
-                        x="기간",
-                        y="검색량",
-                    ).data[0],
+                    go.Scatter(
+                        x=st.session_state.df_combined['기간'], 
+                        y=st.session_state.df_combined['검색량'], 
+                        name='검색량'
+                    ),
                     secondary_y=True,
+                )
+
+                # 레이아웃 업데이트
+                fig1.update_layout(
+                    title_text="월별 수입량과 검색량 추이",
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=1.02,
+                        xanchor="right",
+                        x=1
+                    )
                 )
 
                 # Y축 라벨 설정
                 fig1.update_yaxes(title_text="<b>수입량 (kg)</b>", secondary_y=False)
                 fig1.update_yaxes(title_text="<b>검색량</b>", secondary_y=True)
-                fig1.update_traces(hovertemplate="%{x|%Y-%m}<br>%{y:,.0f}")
+
                 st.plotly_chart(fig1, use_container_width=True)
 
                 # 국가별 수입량/금액 그래프
