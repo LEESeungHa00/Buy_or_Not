@@ -198,26 +198,33 @@ if gs_client is None: st.stop()
 
 st.sidebar.header("⚙️ 분석 설정")
 
-# --- [NEW WORKFLOW] ---
-# 1. Load existing trade data from TDS sheet
-if 'trade_data_loaded' not in st.session_state:
-    st.session_state.raw_trade_df = read_gsheet(gs_client, "TDS")
-    st.session_state.trade_data_loaded = True
+# --- [FIX] App Startup Workflow ---
+if 'data_loaded' not in st.session_state:
+    st.session_state.data_loaded = False
+
+# Show button to start the app and load data
+if not st.session_state.data_loaded:
+    if st.sidebar.button("🚀 데이터 분석 시작하기 (TDS 시트 불러오기)"):
+        st.session_state.raw_trade_df = read_gsheet(gs_client, "TDS")
+        if st.session_state.raw_trade_df is not None and not st.session_state.raw_trade_df.empty:
+            st.session_state.data_loaded = True
+            st.rerun()
+        else:
+            st.sidebar.error("TDS 시트에서 데이터를 불러오지 못했습니다. 시트가 비어있거나 접근 권한을 확인하세요.")
+    else:
+        st.info("👈 사이드바의 '데이터 분석 시작하기' 버튼을 눌러주세요.")
+        # UI for adding new data when no data is loaded yet
+        st.sidebar.subheader("또는, 새 수출입 데이터 추가")
+        uploaded_file = st.sidebar.file_uploader("새 파일 업로드하여 TDS 시트에 추가", type=['csv', 'xlsx'])
+        if uploaded_file:
+            if st.sidebar.button("업로드 파일 시트에 저장"):
+                process_new_trade_data(gs_client, uploaded_file)
+                st.session_state.data_loaded = False # Reset state to force reload
+                st.rerun()
+        st.stop()
+
+# --- Main App Logic (runs only after data is loaded) ---
 raw_trade_df = st.session_state.raw_trade_df
-
-# 2. UI for adding new data
-st.sidebar.subheader("1. 수출입 데이터 추가 (선택 사항)")
-uploaded_file = st.sidebar.file_uploader("새 파일 업로드하여 TDS 시트에 추가", type=['csv', 'xlsx'])
-if uploaded_file:
-    if st.sidebar.button("업로드 파일 시트에 저장"):
-        new_data = process_new_trade_data(gs_client, uploaded_file)
-        if new_data is not None:
-            st.session_state.trade_data_loaded = False # Invalidate cache
-            st.rerun() # Rerun to reload all data
-
-# 3. Check if there's any data to analyze
-if raw_trade_df is None or raw_trade_df.empty:
-    st.info("👈 Google Sheet에 분석할 데이터가 없습니다. 사이드바에서 새 파일을 업로드하고 '업로드 파일 시트에 저장' 버튼을 누르세요."); st.stop()
 
 # 4. If data exists, proceed with the analysis UI
 st.sidebar.subheader("2. 분석 대상 설정")
