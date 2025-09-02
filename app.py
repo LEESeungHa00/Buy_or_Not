@@ -60,12 +60,20 @@ def get_trade_data_from_bq(client, categories):
     except Exception as e:
         st.error(f"BigQuery에서 TDS 데이터를 읽는 중 오류 발생: {e}"); return pd.DataFrame()
 
-def add_data_to_bq(client, df, table_name): # --- [FIX] Generic function to add data ---
+def add_data_to_bq(client, df, table_name):
     """새로운 데이터를 지정된 BigQuery 테이블에 추가합니다."""
     project_id = client.project
     table_id = f"{project_id}.data_explorer.{table_name}"
     try:
+        # --- [FIX START] ---
+        # MultiIndex(계층형 헤더)인 경우, 헤더를 단순화(flatten)합니다.
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = ['_'.join(map(str, col)).strip() for col in df.columns.values]
+        
+        # 단순화된 헤더에 대해 이름 정리 작업을 수행합니다.
         df.columns = df.columns.str.replace(' ', '_').str.replace('[^A-Za-z0-9_]', '', regex=True)
+        # --- [FIX END] ---
+        
         with st.spinner(f"새 데이터를 BigQuery '{table_name}' 테이블에 저장하는 중..."):
             pandas_gbq.to_gbq(df, table_id, project_id=project_id, if_exists="append", credentials=client._credentials)
         st.success(f"새 데이터가 BigQuery '{table_name}' 테이블에 성공적으로 저장되었습니다.")
@@ -146,7 +154,6 @@ def fetch_trends_data(client, keywords, start_date, end_date, naver_keys):
                 merged_df = reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), keyword_dfs)
                 all_data.append(merged_df)
                 
-                # Reshape for caching
                 df_to_cache = merged_df.melt(id_vars=['날짜'], var_name='Source', value_name='Value')
                 df_to_cache[['Source', 'Keyword']] = df_to_cache['Source'].str.split('_', expand=True)
                 add_data_to_bq(client, df_to_cache, table_name=table_name)
@@ -157,7 +164,6 @@ def fetch_trends_data(client, keywords, start_date, end_date, naver_keys):
 
 
 def fetch_kamis_data(client, item_info, start_date, end_date, kamis_keys):
-    # (KAMIS data is volatile and API is per-day, so fetching fresh is often better)
     all_data = []
     date_range = pd.date_range(start=start_date, end=end_date)
     if len(date_range) > 180: st.sidebar.warning(f"KAMIS 조회 기간이 {len(date_range)}일로 깁니다. 오래 걸릴 수 있습니다.")
