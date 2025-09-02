@@ -32,11 +32,25 @@ def get_gspread_client():
 
 @st.cache_data(ttl=600)
 def read_gsheet(_gs_client, sheet_name):
-    """지정된 시트에서 모든 데이터를 읽어 DataFrame으로 반환합니다."""
+    """지정된 시트에서 모든 데이터를 읽어 DataFrame으로 반환합니다. (대용량 데이터 최적화)"""
     try:
         spreadsheet = _gs_client.open_by_key(st.secrets["google_sheet_key"])
         worksheet = spreadsheet.worksheet(sheet_name)
-        return pd.DataFrame(worksheet.get_all_records())
+        
+        with st.spinner(f"'{sheet_name}' 시트에서 대용량 데이터를 읽는 중..."):
+            # get_all_values()는 대용량 시트에 훨씬 빠르고 안정적입니다.
+            all_values = worksheet.get_all_values()
+        
+        if not all_values or len(all_values) < 2: # 헤더 + 데이터가 최소 2줄은 있어야 함
+            return pd.DataFrame()
+            
+        # 첫 번째 행을 헤더로, 나머지를 데이터로 사용
+        header = all_values[0]
+        data = all_values[1:]
+        
+        df = pd.DataFrame(data, columns=header)
+        return df
+        
     except gspread.exceptions.WorksheetNotFound:
         return pd.DataFrame()
     except Exception as e:
