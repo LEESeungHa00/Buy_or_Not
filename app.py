@@ -347,40 +347,49 @@ with tab3:
 
         if len(final_df.columns) > 1:
             st.write("#### 상관관계 히트맵")
-            corr_matrix = final_df.corr()
+            corr_matrix = final_df.corr(numeric_only=True)
             fig_heatmap = px.imshow(corr_matrix, text_auto=True, aspect="auto", 
                                     color_continuous_scale='RdBu_r', range_color=[-1, 1],
                                     title="전체 변수 간 상관관계 히트맵")
             st.plotly_chart(fig_heatmap, use_container_width=True)
 
             st.write("#### 시차별 상관관계 분석 (Cross-Correlation)")
-            col1_name = st.selectbox("기준 변수 선택 (Y축)", final_df.columns)
-            col2_name = st.selectbox("비교 변수 선택 (X축)", final_df.columns)
             
-            max_lag = 12
-            lags = range(-max_lag, max_lag + 1)
-            
-            @st.cache_data
-            def calculate_cross_corr(df, col1, col2):
-                correlations = [df[col1].corr(df[col2].shift(lag)) for lag in lags]
-                return pd.DataFrame({'Lag (주)': lags, '상관계수': correlations})
+            # --- [FIX START] 변수 선택 UI 개선 ---
+            base_vars = [col for col in final_df.columns if '수입' in col]
+            influencing_vars = [col for col in final_df.columns if '수입' not in col]
 
-            if col1_name and col2_name:
-                cross_corr_df = calculate_cross_corr(final_df, col1_name, col2_name)
+            if not base_vars or not influencing_vars:
+                st.warning("상관관계를 비교하려면 '수입' 관련 변수와 '외부' 변수가 모두 필요합니다.")
+            else:
+                col1_name = st.selectbox("기준 변수 (결과) 선택", base_vars)
+                col2_name = st.selectbox("영향 변수 (원인) 선택", influencing_vars)
                 
-                fig_cross_corr = px.bar(cross_corr_df, x='Lag (주)', y='상관계수', 
-                                        title=f"'{col1_name}'와 '{col2_name}'의 시차별 상관관계",
-                                        labels={'Lag (주)': f"'{col2_name}'가 몇 주 선행/후행하는가", '상관계수': '상관계수'})
-                fig_cross_corr.add_hline(y=0)
-                st.plotly_chart(fig_cross_corr, use_container_width=True)
+                max_lag = 12
+                lags = range(-max_lag, max_lag + 1)
                 
-                st.info(
-                    f"""
-                    - **양수 Lag (+)**: '{col2_name}'가 '{col1_name}'보다 **나중에** 움직일 때의 상관관계를 의미합니다. (예: 수입량이 증가한 후, 몇 주 뒤에 가격이 오르는 경향)
-                    - **음수 Lag (-)**: '{col2_name}'가 '{col1_name}'보다 **먼저** 움직일 때의 상관관계를 의미합니다. (예: 검색량이 증가한 후, 몇 주 뒤에 수입량이 오르는 경향)
-                    - 막대가 가장 높은/낮은 지점이 두 변수 간의 영향력이 가장 큰 시차일 가능성이 높습니다.
-                    """
-                )
+                @st.cache_data
+                def calculate_cross_corr(df, col1, col2):
+                    correlations = [df[col1].corr(df[col2].shift(lag)) for lag in lags]
+                    return pd.DataFrame({'Lag (주)': lags, '상관계수': correlations})
+
+                if col1_name and col2_name:
+                    cross_corr_df = calculate_cross_corr(final_df, col1_name, col2_name)
+                    
+                    fig_cross_corr = px.bar(cross_corr_df, x='Lag (주)', y='상관계수', 
+                                            title=f"'{col1_name}'와 '{col2_name}'의 시차별 상관관계",
+                                            labels={'Lag (주)': f"'{col2_name}'가 몇 주 선행/후행하는가", '상관계수': '상관계수'})
+                    fig_cross_corr.add_hline(y=0)
+                    st.plotly_chart(fig_cross_corr, use_container_width=True)
+                    
+                    st.info(
+                        f"""
+                        - **양수 Lag (+)**: **'{col2_name}'** (원인)이 '{col1_name}'(결과)보다 **나중에** 움직일 때의 상관관계를 의미합니다. (예: 수입량이 먼저 변하고, 몇 주 뒤에 가격이 따라 변하는 경향)
+                        - **음수 Lag (-)**: **'{col2_name}'** (원인)이 '{col1_name}'(결과)보다 **먼저** 움직일 때의 상관관계를 의미합니다. (예: 검색량이 먼저 증가하고, 몇 주 뒤에 수입량이 따라 증가하는 경향)
+                        - 막대가 가장 높은/낮은 지점이 두 변수 간의 영향력이 가장 큰 시차일 가능성이 높습니다.
+                        """
+                    )
+            # --- [FIX END] ---
         else:
             st.warning("상관관계를 분석하려면 두 개 이상의 데이터 열이 필요합니다.")
     else: 
