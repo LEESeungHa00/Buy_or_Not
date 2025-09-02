@@ -45,7 +45,7 @@ def read_gsheet(_gs_client, sheet_name):
         df = pd.DataFrame(data, columns=header)
         # 데이터 타입 변환 (숫자형, 날짜형 등)
         for col in df.columns:
-            if '가격' in col or '량' in col or '액' in col or 'Price' in col:
+            if '가격' in col or '량' in col or '액' in col or 'Price' in col or 'Value' in col or 'Volume' in col:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
             elif '일자' in col or 'Date' in col:
                 df[col] = pd.to_datetime(df[col], errors='coerce')
@@ -100,15 +100,13 @@ def fetch_yfinance_data(gs_client, tickers, start_date, end_date):
     df_sheet = read_gsheet(gs_client, sheet_name)
 
     for name, ticker in tickers.items():
-        # Check cache first
         if not df_sheet.empty and 'Ticker' in df_sheet.columns:
             cached_data = df_sheet[(df_sheet['Ticker'] == ticker) & (df_sheet['조사일자'] >= start_date) & (df_sheet['조사일자'] <= end_date)]
-            if len(cached_data) >= (end_date - start_date).days * 0.8: # 80% 이상 데이터가 있으면 캐시 사용
+            if len(cached_data) >= (end_date - start_date).days * 0.8:
                  st.sidebar.info(f"'{name}' 데이터를 Google Sheet에서 로드했습니다.")
                  all_data.append(cached_data.rename(columns={'Price': f'{name} 선물가격(USD)'})[['조사일자', f'{name} 선물가격(USD)']])
                  continue
 
-        # Fetch from API
         with st.spinner(f"'{name}' 데이터를 Yahoo Finance API에서 가져오는 중..."):
             data = yf.download(ticker, start=start_date, end=end_date, progress=False)
             if not data.empty:
@@ -127,7 +125,6 @@ def fetch_trends_data(gs_client, keywords, start_date, end_date, naver_keys):
     df_sheet = read_gsheet(gs_client, sheet_name)
     
     for keyword in keywords:
-        # Check cache first
         google_col = f'Google_{keyword}'; naver_col = f'Naver_{keyword}'
         if not df_sheet.empty and '날짜' in df_sheet.columns and (google_col in df_sheet.columns or naver_col in df_sheet.columns):
             cached_data = df_sheet[(df_sheet['날짜'] >= start_date) & (df_sheet['날짜'] <= end_date)]
@@ -139,16 +136,16 @@ def fetch_trends_data(gs_client, keywords, start_date, end_date, naver_keys):
                  all_data.append(cached_data[cols_to_use])
                  continue
 
-        # Fetch from API
         with st.spinner(f"'{keyword}' 검색량 데이터를 API에서 가져오는 중..."):
+            keyword_dfs = [] # --- [FIX] keyword별로 데이터를 모을 리스트 ---
+
             pytrends = TrendReq(hl='ko-KR', tz=540)
             timeframe = f"{start_date.strftime('%Y-%m-%d')} {end_date.strftime('%Y-%m-%d')}"
             pytrends.build_payload([keyword], cat=0, timeframe=timeframe, geo='KR', gprop='')
             google_df = pytrends.interest_over_time()
             if not google_df.empty and keyword in google_df.columns:
                 google_df_renamed = google_df.reset_index().rename(columns={'date': '날짜', keyword: google_col})
-                all_data.append(google_df_renamed[['날짜', google_col]])
-                update_gsheet(gs_client, sheet_name, google_df_renamed[['날짜', google_col]])
+                keyword_dfs.append(google_df_renamed[['날짜', google_col]])
 
             if naver_keys['id'] and naver_keys['secret']:
                 url = "https://openapi.naver.com/v1/datalab/search"
@@ -160,11 +157,17 @@ def fetch_trends_data(gs_client, keywords, start_date, end_date, naver_keys):
                     naver_raw = json.loads(response.read().decode('utf-8'))
                     naver_df = pd.DataFrame(naver_raw['results'][0]['data']).rename(columns={'period': '날짜', 'ratio': naver_col})
                     naver_df['날짜'] = pd.to_datetime(naver_df['날짜'])
-                    all_data.append(naver_df)
-                    update_gsheet(gs_client, sheet_name, naver_df)
+                    keyword_dfs.append(naver_df)
+            
+            # --- [FIX] 데이터를 모두 모은 후 한번에 통합하고 저장 ---
+            if keyword_dfs:
+                merged_keyword_df = reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), keyword_dfs)
+                all_data.append(merged_keyword_df)
+                update_gsheet(gs_client, sheet_name, merged_keyword_df)
 
     if not all_data: return pd.DataFrame()
     return reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), all_data)
+
 
 def fetch_kamis_data(gs_client, item_info, start_date, end_date, kamis_keys):
     all_data = []
@@ -224,8 +227,10 @@ if not st.session_state.tds_data.empty and 'file_name' in st.session_state.tds_d
                 st.sidebar.warning(f"'{uploaded_file.name}'은 이미 존재합니다. 위에서 선택해주세요.")
                 raw_trade_df = None
             else:
-                raw_trade_df = process_new_trade_data(gs_client, uploaded_file)
-                st.session_state.tds_data = pd.concat([st.session_state.tds_data, raw_trade_df]) # Update state
+                new_data = process_new_trade_data(gs_client, uploaded_file)
+                if new_data is not None:
+                    st.session_state.tds_data = pd.concat([st.session_state.tds_data, new_data])
+                raw_trade_df = new_data
     else:
         raw_trade_df = st.session_state.tds_data[st.session_state.tds_data['file_name'] == selected_option].copy()
         raw_trade_df = raw_trade_df.drop(columns=['file_name'])
@@ -234,6 +239,8 @@ else:
     uploaded_file = st.sidebar.file_uploader("수출입 데이터 파일 업로드", type=['csv', 'xlsx'])
     if uploaded_file:
         raw_trade_df = process_new_trade_data(gs_client, uploaded_file)
+        if raw_trade_df is not None:
+            st.session_state.tds_data = raw_trade_df # Initialize state
     else:
         raw_trade_df = None
 
@@ -244,11 +251,13 @@ if raw_trade_df is None:
 file_start_date, file_end_date = raw_trade_df['Date'].min(), raw_trade_df['Date'].max()
 category_options = sorted(raw_trade_df['Category'].unique())
 selected_categories = st.sidebar.multiselect("2. 분석할 품목 카테고리 선택", category_options, default=category_options[0] if category_options else None)
-keyword_input = st.sidebar.text_input("3. 검색어 입력 (쉼표로 구분)", ", ".join(selected_categories) if selected_categories else "")
+keyword_input = st.sidebar.text_input("3. 검색어 입력 (쉼표로 구분)", ", ".join(selected_categories) if selected_categories else None)
 search_keywords = [k.strip() for k in keyword_input.split(',') if k.strip()]
 st.sidebar.subheader("4. 분석 기간 설정")
-start_date = st.sidebar.date_input('시작일', file_start_date, min_value=file_start_date, max_value=file_end_date)
-end_date = st.sidebar.date_input('종료일', file_end_date, min_value=start_date, max_value=file_end_date)
+start_date_input = st.sidebar.date_input('시작일', file_start_date, min_value=file_start_date, max_value=file_end_date)
+end_date_input = st.sidebar.date_input('종료일', file_end_date, min_value=start_date_input, max_value=file_end_date)
+start_date = pd.to_datetime(start_date_input)
+end_date = pd.to_datetime(end_date_input)
 
 # --- External Data Loading Section ---
 st.sidebar.subheader("🔗 외부 가격 데이터")
@@ -313,6 +322,7 @@ with tab2:
             wholesale_weekly = pd.DataFrame()
             if not raw_wholesale_df.empty:
                 date_col = '조사일자' if '조사일자' in raw_wholesale_df.columns else '날짜'
+                raw_wholesale_df[date_col] = pd.to_datetime(raw_wholesale_df[date_col], errors='coerce')
                 wholesale_df_processed = raw_wholesale_df.set_index(date_col)
                 price_cols = [col for col in wholesale_df_processed.columns if '가격' in col]
                 agg_dict = {col: 'mean' for col in price_cols}
@@ -324,6 +334,7 @@ with tab2:
             
             search_weekly = pd.DataFrame()
             if not raw_search_df.empty:
+                raw_search_df['날짜'] = pd.to_datetime(raw_search_df['날짜'], errors='coerce')
                 search_df_processed = raw_search_df.set_index('날짜')
                 numeric_cols = search_df_processed.select_dtypes(include=np.number).columns
                 search_weekly = search_df_processed.resample('W-Mon').agg({col: 'mean' for col in numeric_cols})
