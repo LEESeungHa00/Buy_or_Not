@@ -3,9 +3,16 @@ pandas
 numpy
 plotly
 scikit-learn
+xgboost
+lightgbm
 gspread
 google-auth
 google-api-python-client
 oauth2client
 statsmodels
 beautifulsoup4
+transformers
+sentencepiece
+pytrends
+requests
+plotly-express
