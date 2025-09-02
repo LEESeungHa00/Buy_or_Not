@@ -16,3 +16,4 @@ sentencepiece
 pytrends
 requests
 plotly-express
+openpyxl
