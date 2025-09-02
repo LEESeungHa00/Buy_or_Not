@@ -99,11 +99,11 @@ def fetch_naver_datalab(client_id, client_secret, keyword, start_date, end_date)
 
 @st.cache_data(ttl=3600)
 def fetch_kamis_data(api_key, api_id, item_code, category_code, start_date, end_date):
-    """KAMIS에서 일별 품목별 도매가격 데이터를 가져옵니다."""
+    """KAMIS에서 일별 품목별 도매가격 데이터를 가져옵니다. (안정성 강화 버전)"""
     all_data = []
+    failed_requests = 0
     date_range = pd.date_range(start=start_date, end=end_date)
     
-    # [수정] 조회 기간이 길 경우 경고 메시지 표시
     if len(date_range) > 180:
         st.sidebar.warning(f"조회 기간이 {len(date_range)}일로 너무 깁니다. 로딩에 매우 오랜 시간이 소요될 수 있습니다.")
 
@@ -120,20 +120,39 @@ def fetch_kamis_data(api_key, api_id, item_code, category_code, start_date, end_
         )
         try:
             response = requests.get(url, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-            
-            items = data.get("data", {}).get("item", [])
-            if items:
-                price = items[0].get('dpr1', '0').replace(',', '')
-                if price and int(price) > 0:
-                    all_data.append({'조사일자': date, '도매가격(원)': int(price)})
-        except (requests.exceptions.RequestException, json.JSONDecodeError, IndexError) as e:
-            print(f"KAMIS data fetch error for {date_str}: {e}")
+            if response.status_code == 200:
+                data = response.json()
+                
+                if isinstance(data, dict) and data.get("error_code"):
+                    if failed_requests == 0:
+                         st.sidebar.warning(f"KAMIS API 오류: {data.get('message', '알 수 없는 오류')}")
+                    print(f"KAMIS API error on {date_str}: {data}")
+                    failed_requests += 1
+                    continue
+
+                items = data.get("data", {}).get("item", [])
+                if items:
+                    price_str = items[0].get('dpr1', '0').replace(',', '')
+                    if price_str.isdigit() and int(price_str) > 0:
+                        all_data.append({'조사일자': date, '도매가격(원)': int(price_str)})
+            else:
+                print(f"KAMIS HTTP error on {date_str}: Status {response.status_code}")
+                failed_requests += 1
+
+        except requests.exceptions.Timeout:
+            print(f"KAMIS request timed out for {date_str}")
+            failed_requests += 1
+        except Exception as e:
+            print(f"An unexpected error occurred for {date_str}: {e}")
+            failed_requests += 1
         
         progress_bar.progress((i + 1) / len(date_range), text=f"KAMIS 데이터 조회 중... {date_str}")
     
     progress_bar.empty()
+    
+    if failed_requests > 10:
+        st.sidebar.error(f"총 {len(date_range)}일 중 {failed_requests}건의 KAMIS 데이터 조회에 실패했습니다. 서버가 불안정할 수 있습니다.")
+
     if not all_data:
         st.sidebar.warning("해당 기간에 대한 KAMIS 데이터가 없습니다.")
         return None
@@ -144,7 +163,6 @@ def fetch_kamis_data(api_key, api_id, item_code, category_code, start_date, end_
 # --- Constants ---
 COFFEE_TICKERS_YFINANCE = {"미국 커피 C": "KC=F", "런던 로부스타": "RC=F"}
 
-# --- [수정] KAMIS 품목 선택지 대폭 확장 ---
 KAMIS_CATEGORIES = {
     "채소류": "100", "과일류": "200", "축산물": "300", "수산물": "400"
 }
@@ -154,7 +172,6 @@ KAMIS_ITEMS = {
     "축산물": {"소고기": "311", "돼지고기": "312", "닭고기": "313", "계란": "314"},
     "수산물": {"고등어": "411", "오징어": "413", "새우": "421", "연어": "423"}
 }
-
 
 # --- Streamlit App ---
 st.set_page_config(layout="wide")
