@@ -36,21 +36,20 @@ def read_gsheet(_gs_client, sheet_name):
     try:
         spreadsheet = _gs_client.open_by_key(st.secrets["google_sheet_key"])
         worksheet = spreadsheet.worksheet(sheet_name)
-        
         with st.spinner(f"'{sheet_name}' 시트에서 대용량 데이터를 읽는 중..."):
-            # get_all_values()는 대용량 시트에 훨씬 빠르고 안정적입니다.
             all_values = worksheet.get_all_values()
-        
-        if not all_values or len(all_values) < 2: # 헤더 + 데이터가 최소 2줄은 있어야 함
+        if not all_values or len(all_values) < 2:
             return pd.DataFrame()
-            
-        # 첫 번째 행을 헤더로, 나머지를 데이터로 사용
         header = all_values[0]
         data = all_values[1:]
-        
         df = pd.DataFrame(data, columns=header)
+        # 데이터 타입 변환 (숫자형, 날짜형 등)
+        for col in df.columns:
+            if '가격' in col or '량' in col or '액' in col or 'Price' in col:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+            elif '일자' in col or 'Date' in col:
+                df[col] = pd.to_datetime(df[col], errors='coerce')
         return df
-        
     except gspread.exceptions.WorksheetNotFound:
         return pd.DataFrame()
     except Exception as e:
@@ -64,8 +63,7 @@ def update_gsheet(client, sheet_name, df_to_add):
         spreadsheet = client.open_by_key(st.secrets["google_sheet_key"])
         try:
             worksheet = spreadsheet.worksheet(sheet_name)
-            # 시트가 비어있으면 헤더 추가
-            if not worksheet.get_all_records():
+            if not worksheet.get_all_records(numericise_ignore=['all']): # Use a lightweight check
                  worksheet.update([df_to_add.columns.values.tolist()])
         except gspread.exceptions.WorksheetNotFound:
             worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=1, cols=len(df_to_add.columns))
@@ -100,23 +98,23 @@ def fetch_yfinance_data(gs_client, tickers, start_date, end_date):
     sheet_name = "yfinance"
     all_data = []
     df_sheet = read_gsheet(gs_client, sheet_name)
-    if not df_sheet.empty: df_sheet['조사일자'] = pd.to_datetime(df_sheet['조사일자'])
 
     for name, ticker in tickers.items():
+        # Check cache first
         if not df_sheet.empty and 'Ticker' in df_sheet.columns:
-            cached_data = df_sheet[(df_sheet['Ticker'] == ticker) & (df_sheet['조사일자'] >= pd.to_datetime(start_date)) & (df_sheet['조사일자'] <= pd.to_datetime(end_date))]
-            if len(cached_data) >= (end_date - start_date).days * 0.9: # 데이터가 충분하면 캐시 사용
+            cached_data = df_sheet[(df_sheet['Ticker'] == ticker) & (df_sheet['조사일자'] >= start_date) & (df_sheet['조사일자'] <= end_date)]
+            if len(cached_data) >= (end_date - start_date).days * 0.8: # 80% 이상 데이터가 있으면 캐시 사용
                  st.sidebar.info(f"'{name}' 데이터를 Google Sheet에서 로드했습니다.")
                  all_data.append(cached_data.rename(columns={'Price': f'{name} 선물가격(USD)'})[['조사일자', f'{name} 선물가격(USD)']])
                  continue
 
+        # Fetch from API
         with st.spinner(f"'{name}' 데이터를 Yahoo Finance API에서 가져오는 중..."):
             data = yf.download(ticker, start=start_date, end=end_date, progress=False)
             if not data.empty:
                 df = data[['Close']].copy().reset_index().rename(columns={'Date': '조사일자', 'Close': 'Price'})
                 df['Ticker'] = ticker
                 update_gsheet(gs_client, sheet_name, df)
-                st.sidebar.info(f"'{name}' 데이터를 API에서 가져와 Google Sheet에 저장했습니다.")
                 all_data.append(df.rename(columns={'Price': f'{name} 선물가격(USD)'})[['조사일자', f'{name} 선물가격(USD)']])
             else: st.sidebar.warning(f"'{name}'에 대한 API 데이터가 없습니다.")
 
@@ -126,16 +124,31 @@ def fetch_yfinance_data(gs_client, tickers, start_date, end_date):
 def fetch_trends_data(gs_client, keywords, start_date, end_date, naver_keys):
     sheet_name = "네이버데이터랩"
     all_data = []
+    df_sheet = read_gsheet(gs_client, sheet_name)
     
     for keyword in keywords:
+        # Check cache first
+        google_col = f'Google_{keyword}'; naver_col = f'Naver_{keyword}'
+        if not df_sheet.empty and '날짜' in df_sheet.columns and (google_col in df_sheet.columns or naver_col in df_sheet.columns):
+            cached_data = df_sheet[(df_sheet['날짜'] >= start_date) & (df_sheet['날짜'] <= end_date)]
+            if not cached_data.empty:
+                 st.sidebar.info(f"'{keyword}' 검색량 데이터를 Google Sheet에서 로드했습니다.")
+                 cols_to_use = ['날짜']
+                 if google_col in cached_data.columns: cols_to_use.append(google_col)
+                 if naver_col in cached_data.columns: cols_to_use.append(naver_col)
+                 all_data.append(cached_data[cols_to_use])
+                 continue
+
+        # Fetch from API
         with st.spinner(f"'{keyword}' 검색량 데이터를 API에서 가져오는 중..."):
             pytrends = TrendReq(hl='ko-KR', tz=540)
             timeframe = f"{start_date.strftime('%Y-%m-%d')} {end_date.strftime('%Y-%m-%d')}"
             pytrends.build_payload([keyword], cat=0, timeframe=timeframe, geo='KR', gprop='')
             google_df = pytrends.interest_over_time()
             if not google_df.empty and keyword in google_df.columns:
-                google_df = google_df.reset_index().rename(columns={'date': '날짜', keyword: f'Google_{keyword}'})
-                all_data.append(google_df[['날짜', f'Google_{keyword}']])
+                google_df_renamed = google_df.reset_index().rename(columns={'date': '날짜', keyword: google_col})
+                all_data.append(google_df_renamed[['날짜', google_col]])
+                update_gsheet(gs_client, sheet_name, google_df_renamed[['날짜', google_col]])
 
             if naver_keys['id'] and naver_keys['secret']:
                 url = "https://openapi.naver.com/v1/datalab/search"
@@ -145,17 +158,15 @@ def fetch_trends_data(gs_client, keywords, start_date, end_date, naver_keys):
                 response = urllib.request.urlopen(request, data=body.encode("utf-8"))
                 if response.getcode() == 200:
                     naver_raw = json.loads(response.read().decode('utf-8'))
-                    naver_df = pd.DataFrame(naver_raw['results'][0]['data']).rename(columns={'period': '날짜', 'ratio': f'Naver_{keyword}'})
+                    naver_df = pd.DataFrame(naver_raw['results'][0]['data']).rename(columns={'period': '날짜', 'ratio': naver_col})
                     naver_df['날짜'] = pd.to_datetime(naver_df['날짜'])
                     all_data.append(naver_df)
-    
+                    update_gsheet(gs_client, sheet_name, naver_df)
+
     if not all_data: return pd.DataFrame()
-    final_trends_df = reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), all_data)
-    # update_gsheet(gs_client, sheet_name, final_trends_df) # 검색량은 변동성이 크므로 매번 새로 조회
-    return final_trends_df
+    return reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), all_data)
 
 def fetch_kamis_data(gs_client, item_info, start_date, end_date, kamis_keys):
-    sheet_name = "kamis"
     all_data = []
     date_range = pd.date_range(start=start_date, end=end_date)
     if len(date_range) > 180: st.sidebar.warning(f"KAMIS 조회 기간이 {len(date_range)}일로 깁니다. 오래 걸릴 수 있습니다.")
@@ -181,7 +192,6 @@ def fetch_kamis_data(gs_client, item_info, start_date, end_date, kamis_keys):
     progress_bar.empty()
     if not all_data: st.sidebar.warning("해당 기간에 대한 KAMIS 데이터가 없습니다."); return pd.DataFrame()
     df = pd.DataFrame(all_data)
-    # update_gsheet(gs_client, sheet_name, df) # KAMIS도 변동성이 크므로 매번 새로 조회
     return df
 
 # --- Constants ---
@@ -199,12 +209,11 @@ if gs_client is None: st.stop()
 st.sidebar.header("⚙️ 분석 설정")
 st.sidebar.subheader("1. 분석 데이터셋 선택")
 
-raw_trade_df = None
-with st.spinner("Google Sheet에서 기존 데이터를 확인 중..."):
-    all_tds_data = read_gsheet(gs_client, "TDS")
+if 'tds_data' not in st.session_state:
+    st.session_state.tds_data = read_gsheet(gs_client, "TDS")
 
-if not all_tds_data.empty and 'file_name' in all_tds_data.columns:
-    existing_files = sorted(all_tds_data['file_name'].unique())
+if not st.session_state.tds_data.empty and 'file_name' in st.session_state.tds_data.columns:
+    existing_files = sorted(st.session_state.tds_data['file_name'].unique())
     selection_options = ["새 파일 업로드"] + existing_files
     selected_option = st.sidebar.selectbox("데이터셋 선택 또는 새 파일 업로드", selection_options)
 
@@ -213,18 +222,20 @@ if not all_tds_data.empty and 'file_name' in all_tds_data.columns:
         if uploaded_file:
             if uploaded_file.name in existing_files:
                 st.sidebar.warning(f"'{uploaded_file.name}'은 이미 존재합니다. 위에서 선택해주세요.")
+                raw_trade_df = None
             else:
                 raw_trade_df = process_new_trade_data(gs_client, uploaded_file)
+                st.session_state.tds_data = pd.concat([st.session_state.tds_data, raw_trade_df]) # Update state
     else:
-        st.sidebar.success(f"'{selected_option}' 데이터를 Google Sheet에서 로드했습니다.")
-        raw_trade_df = all_tds_data[all_tds_data['file_name'] == selected_option].copy()
-        raw_trade_df['Date'] = pd.to_datetime(raw_trade_df['Date'])
+        raw_trade_df = st.session_state.tds_data[st.session_state.tds_data['file_name'] == selected_option].copy()
         raw_trade_df = raw_trade_df.drop(columns=['file_name'])
 else:
     st.sidebar.info("저장된 데이터가 없습니다. 새 파일을 업로드해주세요.")
     uploaded_file = st.sidebar.file_uploader("수출입 데이터 파일 업로드", type=['csv', 'xlsx'])
     if uploaded_file:
         raw_trade_df = process_new_trade_data(gs_client, uploaded_file)
+    else:
+        raw_trade_df = None
 
 if raw_trade_df is None:
     st.info("👈 사이드바에서 분석할 데이터셋을 선택하거나 새 파일을 업로드해주세요."); st.stop()
@@ -240,7 +251,6 @@ start_date = st.sidebar.date_input('시작일', file_start_date, min_value=file_
 end_date = st.sidebar.date_input('종료일', file_end_date, min_value=start_date, max_value=file_end_date)
 
 # --- External Data Loading Section ---
-raw_wholesale_df = pd.DataFrame()
 st.sidebar.subheader("🔗 외부 가격 데이터")
 is_coffee_selected = any('커피' in str(cat) for cat in selected_categories)
 
@@ -263,10 +273,9 @@ else:
                 st.session_state['wholesale_data'] = df
             else: st.sidebar.error("KAMIS API Key와 ID를 모두 입력해주세요.")
 
-if 'wholesale_data' in st.session_state: raw_wholesale_df = st.session_state['wholesale_data']
+raw_wholesale_df = st.session_state.get('wholesale_data', pd.DataFrame())
 
 # --- Search Data Loading Section ---
-raw_search_df = pd.DataFrame()
 st.sidebar.subheader("📰 검색량 데이터")
 naver_client_id = st.sidebar.text_input("Naver API Client ID", type="password")
 naver_client_secret = st.sidebar.text_input("Naver API Client Secret", type="password")
@@ -276,7 +285,7 @@ if st.sidebar.button("검색량 데이터 가져오기"):
         df = fetch_trends_data(gs_client, search_keywords, start_date, end_date, {'id': naver_client_id, 'secret': naver_client_secret})
         st.session_state['search_data'] = df
 
-if 'search_data' in st.session_state: raw_search_df = st.session_state['search_data']
+raw_search_df = st.session_state.get('search_data', pd.DataFrame())
 
 # --- Main Display Area ---
 tab1, tab2, tab3 = st.tabs(["1️⃣ 원본 데이터 확인", "2️⃣ 데이터 표준화", "3️⃣ 최종 통합 데이터"])
@@ -290,7 +299,7 @@ with tab2:
     if not selected_categories: st.warning("분석할 카테고리를 선택해주세요.")
     else:
         st.subheader("2-1. 분석 대상 품목 필터링")
-        trade_df_in_range = raw_trade_df[(raw_trade_df['Date'] >= pd.to_datetime(start_date)) & (raw_trade_df['Date'] <= pd.to_datetime(end_date))]
+        trade_df_in_range = raw_trade_df[(raw_trade_df['Date'] >= start_date) & (raw_trade_df['Date'] <= end_date)]
         filtered_trade_df = trade_df_in_range[trade_df_in_range['Category'].isin(selected_categories)].copy()
         st.write(f"선택된 카테고리: **{', '.join(selected_categories)}**"); st.dataframe(filtered_trade_df.head())
         
@@ -304,19 +313,17 @@ with tab2:
             wholesale_weekly = pd.DataFrame()
             if not raw_wholesale_df.empty:
                 date_col = '조사일자' if '조사일자' in raw_wholesale_df.columns else '날짜'
-                raw_wholesale_df[date_col] = pd.to_datetime(raw_wholesale_df[date_col])
                 wholesale_df_processed = raw_wholesale_df.set_index(date_col)
                 price_cols = [col for col in wholesale_df_processed.columns if '가격' in col]
                 agg_dict = {col: 'mean' for col in price_cols}
                 if agg_dict:
                     wholesale_weekly = wholesale_df_processed.resample('W-Mon').agg(agg_dict)
                     if '도매가격(원)' in wholesale_weekly.columns:
-                        wholesale_weekly['도매가격(USD)'] = wholesale_weekly['도매가격(원)'] / 1350
+                        wholesale_weekly['도매가격(USD)'] = wholesale_weekly['도매가격(원)'] / 1350 # 환율 적용
                         wholesale_weekly.drop(columns=['도매가격(원)'], inplace=True)
             
             search_weekly = pd.DataFrame()
             if not raw_search_df.empty:
-                raw_search_df['날짜'] = pd.to_datetime(raw_search_df['날짜'])
                 search_df_processed = raw_search_df.set_index('날짜')
                 numeric_cols = search_df_processed.select_dtypes(include=np.number).columns
                 search_weekly = search_df_processed.resample('W-Mon').agg({col: 'mean' for col in numeric_cols})
