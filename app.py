@@ -18,29 +18,43 @@ import pandas_gbq
 def get_bq_connection():
     """BigQuery에 직접 연결하고 클라이언트 객체를 반환합니다."""
     try:
-        # st.secrets에서 직접 인증 정보 가져오기
         creds_dict = st.secrets["gcp_service_account"]
         creds = service_account.Credentials.from_service_account_info(creds_dict)
-        # BigQuery 클라이언트 생성
         client = bigquery.Client(credentials=creds, project=creds.project_id)
         return client
     except Exception as e:
         st.error(f"Google BigQuery 연결에 실패했습니다. secrets.toml의 [gcp_service_account] 설정을 확인하세요: {e}")
         return None
 
-# --- Data Fetching & Processing Functions (BigQuery Version) ---
-def get_trade_data_from_bq(client):
-    """BigQuery의 tds_data 테이블에서 데이터를 로드합니다."""
+# --- Data Fetching & Processing Functions (Optimized BigQuery Version) ---
+@st.cache_data(ttl=3600)
+def get_categories_from_bq(_client):
+    """BigQuery에서 고유 카테고리 목록만 빠르게 가져옵니다."""
+    project_id = _client.project
+    table_id = f"{project_id}.data_explorer.tds_data"
+    try:
+        with st.spinner("BigQuery에서 카테고리 목록을 불러오는 중..."):
+            query = f"SELECT DISTINCT Category FROM `{table_id}` WHERE Category IS NOT NULL ORDER BY Category"
+            df = _client.query(query).to_dataframe()
+        return sorted(df['Category'].astype(str).unique())
+    except Exception as e:
+        st.error(f"BigQuery에서 카테고리를 읽는 중 오류 발생: {e}")
+        return []
+
+def get_trade_data_from_bq(client, categories):
+    """BigQuery의 tds_data 테이블에서 선택된 카테고리의 데이터만 로드합니다."""
+    if not categories:
+        return pd.DataFrame()
     project_id = client.project
     table_id = f"{project_id}.data_explorer.tds_data"
     try:
-        count_query = f"SELECT count(*) FROM `{table_id}`"
-        count_result = client.query(count_query).to_dataframe()
-        total_rows = count_result.iloc[0,0]
-        
-        with st.spinner(f"BigQuery에서 {total_rows:,}개의 행을 로드하는 중..."):
-            sql = f"SELECT * FROM `{table_id}`"
-            df = client.query(sql).to_dataframe()
+        # SQL Injection을 방지하기 위해 파라미터화된 쿼리를 사용합니다.
+        query_params = [bigquery.ArrayQueryParameter("categories", "STRING", categories)]
+        sql = f"SELECT * FROM `{table_id}` WHERE Category IN UNNEST(@categories)"
+        job_config = bigquery.QueryJobConfig(query_parameters=query_params)
+
+        with st.spinner(f"BigQuery에서 선택된 {len(categories)}개 카테고리 데이터를 로드하는 중..."):
+            df = client.query(sql, job_config=job_config).to_dataframe()
 
         # 데이터 타입 변환
         for col in df.columns:
@@ -58,10 +72,8 @@ def add_trade_data_to_bq(client, df):
     project_id = client.project
     table_id = f"{project_id}.data_explorer.tds_data"
     try:
-        # BigQuery 규칙에 맞게 컬럼 이름 변경
         df.columns = df.columns.str.replace(' ', '_').str.replace('[^A-Za-z0-9_]', '', regex=True)
         with st.spinner("새 데이터를 BigQuery에 저장하는 중..."):
-            # pandas_gbq를 사용하여 데이터 추가
             pandas_gbq.to_gbq(df, table_id, project_id=project_id, if_exists="append", credentials=client._credentials)
         st.success("새 데이터가 BigQuery에 성공적으로 저장되었습니다.")
     except Exception as e:
@@ -151,39 +163,54 @@ if bq_client is None: st.stop()
 
 st.sidebar.header("⚙️ 분석 설정")
 
-# --- App Startup Workflow (BigQuery Version) ---
+# --- App Startup Workflow (Optimized BigQuery Version) ---
 if 'data_loaded' not in st.session_state:
     st.session_state.data_loaded = False
+    st.session_state.categories = get_categories_from_bq(bq_client)
 
-if not st.session_state.data_loaded:
-    if st.sidebar.button("🚀 데이터 분석 시작하기 (BigQuery에서 불러오기)"):
-        st.session_state.raw_trade_df = get_trade_data_from_bq(bq_client)
-        if st.session_state.raw_trade_df is not None and not st.session_state.raw_trade_df.empty:
-            st.session_state.data_loaded = True
+if not st.session_state.categories:
+    st.info("BigQuery에 분석할 데이터가 없습니다. 먼저 데이터를 추가해주세요.")
+    st.sidebar.subheader("새 수출입 데이터 추가")
+    uploaded_file = st.sidebar.file_uploader("새 파일 업로드하여 BigQuery에 추가", type=['csv', 'xlsx'])
+    if uploaded_file:
+        if st.sidebar.button("업로드 파일 BigQuery에 저장"):
+            df_new = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
+            add_trade_data_to_bq(bq_client, df_new)
+            st.session_state.clear() # Clear state to force reload all
             st.rerun()
+    st.stop()
+
+
+# --- Main App Logic (Separated into two stages) ---
+if not st.session_state.data_loaded:
+    st.sidebar.subheader("1. 분석 대상 설정")
+    selected_categories = st.sidebar.multiselect("분석할 품목 카테고리 선택", st.session_state.categories)
+    if st.sidebar.button("🚀 선택 완료 및 분석 시작"):
+        if not selected_categories:
+            st.sidebar.warning("분석할 카테고리를 하나 이상 선택해주세요.")
         else:
-            st.sidebar.error("BigQuery에서 데이터를 불러오지 못했습니다. 테이블이 비어있거나 접근 권한을 확인하세요.")
-    else:
-        st.info("👈 사이드바의 '데이터 분석 시작하기' 버튼을 눌러주세요.")
-        st.sidebar.subheader("또는, 새 수출입 데이터 추가")
-        uploaded_file = st.sidebar.file_uploader("새 파일 업로드하여 BigQuery에 추가", type=['csv', 'xlsx'])
-        if uploaded_file:
-            if st.sidebar.button("업로드 파일 BigQuery에 저장"):
-                df_new = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
-                add_trade_data_to_bq(bq_client, df_new)
-                st.session_state.data_loaded = False # Reset state to force reload
+            st.session_state.raw_trade_df = get_trade_data_from_bq(bq_client, selected_categories)
+            if st.session_state.raw_trade_df is not None and not st.session_state.raw_trade_df.empty:
+                st.session_state.data_loaded = True
+                st.session_state.selected_categories = selected_categories
                 st.rerun()
+            else:
+                st.sidebar.error("선택한 카테고리의 데이터를 불러오지 못했습니다.")
+    else:
+        st.info("👈 사이드바에서 분석할 카테고리를 선택하고 '분석 시작' 버튼을 눌러주세요.")
         st.stop()
 
-# --- Main App Logic (runs only after data is loaded) ---
+# --- Analysis UI (runs only after data is loaded) ---
 raw_trade_df = st.session_state.raw_trade_df
+selected_categories = st.session_state.selected_categories
 
-st.sidebar.subheader("2. 분석 대상 설정")
+st.sidebar.success(f"**{', '.join(selected_categories)}** 카테고리 데이터 로드 완료!")
+st.sidebar.markdown("---") # Divider
+
 try:
     file_start_date, file_end_date = raw_trade_df['Date'].min(), raw_trade_df['Date'].max()
-    category_options = sorted(raw_trade_df['Category'].astype(str).unique())
-    selected_categories = st.sidebar.multiselect("분석할 품목 카테고리 선택", category_options, default=category_options[0] if category_options else None)
-    keyword_input = st.sidebar.text_input("3. 검색어 입력 (쉼표로 구분)", ", ".join(selected_categories) if selected_categories else None)
+    default_keywords = ", ".join(selected_categories) if selected_categories else ""
+    keyword_input = st.sidebar.text_input("3. 검색어 입력 (쉼표로 구분)", default_keywords)
     search_keywords = [k.strip() for k in keyword_input.split(',') if k.strip()]
     st.sidebar.subheader("4. 분석 기간 설정")
     start_date_input = st.sidebar.date_input('시작일', file_start_date, min_value=file_start_date, max_value=file_end_date)
@@ -241,6 +268,7 @@ with tab2:
     else:
         st.subheader("2-1. 분석 대상 품목 필터링")
         trade_df_in_range = raw_trade_df[(raw_trade_df['Date'] >= start_date) & (raw_trade_df['Date'] <= end_date)]
+        # This filter is now redundant as data is pre-filtered, but good for date range selection
         filtered_trade_df = trade_df_in_range[trade_df_in_range['Category'].isin(selected_categories)].copy()
         st.write(f"선택된 카테고리: **{', '.join(selected_categories)}**"); st.dataframe(filtered_trade_df.head())
         
