@@ -1,4 +1,6 @@
-```markdown
+
+
+````markdown
 # 📈 수입량 및 가격 예측 AI 대시보드
 
 다양한 외부 데이터(뉴스, 검색 트렌드, 공공 데이터 등)를 종합하여 특정 품목의 미래 수입량과 가격을 예측하고, 시장 인사이트를 도출하는 머신러닝 기반의 웹 대시보드입니다.
@@ -29,75 +31,63 @@
 
 ### 1. 프로젝트 복제
 
-```
-
+```bash
 git clone [https://github.com/your-username/your-repository-name.git](https://github.com/your-username/your-repository-name.git)
 cd your-repository-name
+````
 
-```
+### 2\. 가상환경 생성 및 활성화
 
-### 2. 가상환경 생성 및 활성화
-
-```
-
+```bash
 # Windows
-
 python -m venv venv
-venv\\Scripts\\activate
+venv\Scripts\activate
 
 # macOS & Linux
-
 python3 -m venv venv
 source venv/bin/activate
-
 ```
 
-### 3. 필요 라이브러리 설치
+### 3\. 필요 라이브러리 설치
 
-```
-
+```bash
 pip install -r requirements.txt
-
 ```
 
-### 4. 폴더 구조 설정
+### 4\. 폴더 구조 설정
 
 프로젝트 루트 디렉토리에 아래와 같이 폴더를 생성해주세요.
 
-```
-
+```text
 /your-repository-name
-|-- /data/              \# DB 파일, 초기 CSV 데이터 등 위치
-|-- /models/            \# 학습된 모델 파일(.json) 저장
-|-- /config/            \# 키워드 매핑 파일(keywords.json) 등 위치
-|-- /src/               \# 파이썬 소스코드
-|-- app.py              \# Streamlit 실행 파일
+|-- /data/              # DB 파일, 초기 CSV 데이터 등 위치
+|-- /models/            # 학습된 모델 파일(.json) 저장
+|-- /config/            # 키워드 매핑 파일(keywords.json) 등 위치
+|-- /src/               # 파이썬 소스코드
+|-- app.py              # Streamlit 실행 파일
 |-- ...
-
 ```
 
-### 5. Streamlit 앱 실행
+### 5\. Streamlit 앱 실행
 
-```
-
+```bash
 streamlit run app.py
-
 ```
 
 브라우저에서 `http://localhost:8501` 주소로 접속하여 대시보드를 확인합니다.
 
 ## 📁 파일 구조
 
-```
-
+```text
 .
 ├── .gitignore
 ├── README.md
 ├── requirements.txt
 ├── app.py
 └── src
-├── **init**.py
-├── data\_processing.py
-└── modeling.py
-
+    ├── __init__.py
+    ├── data_processing.py
+    └── modeling.py
 ```
+
+
