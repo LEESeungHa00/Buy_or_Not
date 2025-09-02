@@ -3,8 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import requests
-from datetime import datetime
-from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
 from functools import reduce
 from pytrends.request import TrendReq
 import json
@@ -98,11 +97,50 @@ def fetch_naver_datalab(client_id, client_secret, keyword, start_date, end_date)
         st.error(f"Naver DataLab ('{keyword}') API 호출 중 오류 발생: {e}")
         return None
 
+@st.cache_data(ttl=3600)
+def fetch_kamis_data(api_key, api_id, item_code, category_code, start_date, end_date):
+    """KAMIS에서 일별 품목별 도매가격 데이터를 가져옵니다."""
+    all_data = []
+    date_range = pd.date_range(start=start_date, end=end_date)
+    progress_bar = st.sidebar.progress(0)
+    
+    for i, date in enumerate(date_range):
+        date_str = date.strftime('%Y-%m-%d')
+        url = (
+            "http://www.kamis.or.kr/service/price/xml.do"
+            f"?p_product_cls_code=02&p_item_category_code={category_code}"
+            f"&p_item_code={item_code}&p_regday={date_str}"
+            "&p_convert_kg_yn=Y"
+            f"&p_cert_key={api_key}&p_cert_id={api_id}&p_returntype=json"
+        )
+        try:
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            
+            if "data" in data and "item" in data["data"]:
+                item_info = data["data"]["item"][0]
+                price = item_info.get('dpr1', '0').replace(',', '')
+                all_data.append({'조사일자': date, '도매가격(원)': int(price)})
+        except (requests.exceptions.RequestException, json.JSONDecodeError, IndexError) as e:
+            # 오류가 발생해도 계속 진행하되, 콘솔에만 기록
+            print(f"KAMIS data fetch error for {date_str}: {e}")
+        
+        progress_bar.progress((i + 1) / len(date_range))
+    
+    progress_bar.empty()
+    if not all_data:
+        st.sidebar.warning("해당 기간에 대한 KAMIS 데이터가 없습니다.")
+        return None
+        
+    df = pd.DataFrame(all_data)
+    return df
+
 # --- Constants ---
-COFFEE_TICKERS_YFINANCE = {
-    "미국 커피 C": "KC=F",
-    "런던 로부스타": "RC=F"
-}
+COFFEE_TICKERS_YFINANCE = {"미국 커피 C": "KC=F", "런던 로부스타": "RC=F"}
+KAMIS_CATEGORIES = {"과일류": "200", "채소류": "100"}
+KAMIS_ITEMS = {"과일류": {"아보카도": "215"}, "채소류": {"양파": "111"}}
+
 
 # --- Streamlit App ---
 st.set_page_config(layout="wide")
@@ -114,30 +152,19 @@ st.sidebar.header("⚙️ 분석 설정")
 uploaded_file = st.sidebar.file_uploader("1. 수출입 데이터 파일 업로드 (CSV or Excel)", type=['csv', 'xlsx'])
 
 # Initialize variables
-raw_trade_df = None
-selected_categories = []
-search_keywords = []
-start_date = None
-end_date = None
+raw_trade_df, selected_categories, search_keywords, start_date, end_date = None, [], [], None, None
 
 if uploaded_file:
-    # 캐시된 함수를 사용하여 데이터를 빠르고 효율적으로 로드
     raw_trade_df = load_trade_data(uploaded_file)
-    
     if raw_trade_df is not None:
-        start_date = raw_trade_df['Date'].min()
-        end_date = raw_trade_df['Date'].max()
-        
+        start_date, end_date = raw_trade_df['Date'].min(), raw_trade_df['Date'].max()
         category_options = sorted(raw_trade_df['Category'].unique())
         selected_categories = st.sidebar.multiselect("2. 분석할 품목 카테고리 선택", category_options, default=category_options[0] if category_options else None)
-        
         keyword_input = st.sidebar.text_input("3. 검색어 입력 (쉼표로 구분)", ", ".join(selected_categories) if selected_categories else "")
         search_keywords = [k.strip() for k in keyword_input.split(',') if k.strip()]
-    else:
-        st.stop() # 데이터 로드 실패 시 앱 실행 중지
+    else: st.stop()
 else:
-    st.info("👈 사이드바에서 분석할 수출입 데이터 파일을 업로드해주세요.")
-    st.stop()
+    st.info("👈 사이드바에서 분석할 수출입 데이터 파일을 업로드해주세요."); st.stop()
 
 # --- External Data Loading Section ---
 raw_wholesale_df = None
@@ -152,21 +179,33 @@ if is_coffee_selected:
         for name, ticker in COFFEE_TICKERS_YFINANCE.items():
              with st.spinner(f"{name}({ticker}) 데이터를 가져오는 중..."):
                 data = fetch_yfinance_data(ticker, name, start_date, end_date)
-                if data is not None:
-                    all_futures_data.append(data)
-        
+                if data is not None: all_futures_data.append(data)
         if all_futures_data:
             st.session_state['futures_data'] = reduce(lambda left, right: pd.merge(left, right, on='조사일자', how='outer'), all_futures_data)
             st.sidebar.success("선물가격 데이터 로드 성공!")
-        else:
-            st.sidebar.error("선물가격 데이터를 가져오지 못했습니다.")
-
+        else: st.sidebar.error("선물가격 데이터를 가져오지 못했습니다.")
     if 'futures_data' in st.session_state:
-        raw_wholesale_df = st.session_state['futures_data']
-        raw_wholesale_df.sort_values('조사일자', inplace=True)
+        raw_wholesale_df = st.session_state['futures_data'].sort_values('조사일자')
 else:
-    wholesale_data_file = st.sidebar.file_uploader("도매가격 데이터 업로드 (KAMIS 등)", type=['csv', 'xlsx'])
-    # ... (file upload logic) ...
+    st.sidebar.info("KAMIS에서 농산물 도매가격 데이터를 가져옵니다.")
+    kamis_api_key = st.sidebar.text_input("KAMIS API Key", value="9b2f72e0-1909-4c08-8f4f-9b6f55b44c88", type="password")
+    kamis_api_id = st.sidebar.text_input("KAMIS API ID", type="password")
+    
+    selected_kamis_category_name = st.sidebar.selectbox("품목 분류 선택", list(KAMIS_CATEGORIES.keys()))
+    if selected_kamis_category_name:
+        kamis_category_code = KAMIS_CATEGORIES[selected_kamis_category_name]
+        item_options = KAMIS_ITEMS[selected_kamis_category_name]
+        selected_item_name = st.sidebar.selectbox("세부 품목 선택", list(item_options.keys()))
+        kamis_item_code = item_options[selected_item_name]
+
+    if st.sidebar.button("KAMIS 데이터 가져오기"):
+        if kamis_api_key and kamis_api_id:
+            with st.spinner(f"KAMIS에서 '{selected_item_name}' 데이터 조회 중... (시간이 걸릴 수 있습니다)"):
+                kamis_df = fetch_kamis_data(kamis_api_key, kamis_api_id, kamis_item_code, kamis_category_code, start_date, end_date)
+                st.session_state['kamis_data'] = kamis_df
+                if kamis_df is not None: st.sidebar.success("KAMIS 데이터 로드 성공!")
+        else: st.sidebar.error("KAMIS API Key와 ID를 모두 입력해주세요.")
+    if 'kamis_data' in st.session_state: raw_wholesale_df = st.session_state['kamis_data']
 
 # --- Search/News Data Loading Section ---
 st.sidebar.subheader("📰 검색량/뉴스 데이터")
@@ -174,37 +213,31 @@ naver_client_id = st.sidebar.text_input("Naver API Client ID", type="password")
 naver_client_secret = st.sidebar.text_input("Naver API Client Secret", type="password")
 
 if st.sidebar.button("Google/Naver 데이터 가져오기"):
-    if not search_keywords:
-        st.sidebar.warning("검색어를 먼저 입력해주세요.")
+    if not search_keywords: st.sidebar.warning("검색어를 먼저 입력해주세요.")
     else:
         all_trends_data = []
         for keyword in search_keywords:
             with st.spinner(f"'{keyword}' Google Trends 데이터 가져오는 중..."):
                 google_data = fetch_google_trends(keyword, start_date, end_date)
                 if google_data is not None: all_trends_data.append(google_data)
-            
             if naver_client_id and naver_client_secret:
                 with st.spinner(f"'{keyword}' Naver DataLab 데이터 가져오는 중..."):
                     naver_data = fetch_naver_datalab(naver_client_id, naver_client_secret, keyword, start_date, end_date)
                     if naver_data is not None: all_trends_data.append(naver_data)
-        
         if all_trends_data:
             st.session_state['search_data'] = reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), all_trends_data)
             st.sidebar.success("검색량 데이터 로드 완료!")
-        else:
-             st.sidebar.error("검색량 데이터를 가져오지 못했습니다.")
+        else: st.sidebar.error("검색량 데이터를 가져오지 못했습니다.")
 
 raw_search_df = st.session_state.get('search_data', pd.DataFrame({'날짜': pd.to_datetime([])}))
-if not raw_search_df.empty:
-    raw_search_df.sort_values('날짜', inplace=True)
+if not raw_search_df.empty: raw_search_df.sort_values('날짜', inplace=True)
 
 # --- Main Display Area ---
 tab1, tab2, tab3 = st.tabs(["1️⃣ 원본 데이터 확인", "2️⃣ 데이터 표준화 (Preprocessing)", "3️⃣ 최종 통합 데이터"])
 
 with tab1:
     st.header("1. 각기 다른 데이터 소스의 원본 형태")
-    st.subheader("A. 수출입 데이터 (사용자 제공)")
-    st.dataframe(raw_trade_df.head())
+    st.subheader("A. 수출입 데이터 (사용자 제공)"); st.dataframe(raw_trade_df.head())
     st.subheader("B. 외부 가격 데이터 (선물/도매)")
     if raw_wholesale_df is not None: st.dataframe(raw_wholesale_df.head())
     else: st.warning("사이드바에서 외부 가격 데이터를 가져오거나 업로드해주세요.")
@@ -214,22 +247,18 @@ with tab1:
 
 with tab2:
     st.header("2. 데이터 표준화: 같은 기준으로 데이터 맞춰주기")
-    
-    if not selected_categories:
-        st.warning("분석할 카테고리를 사이드바에서 하나 이상 선택해주세요.")
+    if not selected_categories: st.warning("분석할 카테고리를 사이드바에서 하나 이상 선택해주세요.")
     else:
         st.subheader("2-1. 분석 대상 품목 필터링")
         filtered_trade_df = raw_trade_df[raw_trade_df['Category'].isin(selected_categories)].copy()
-        st.write(f"선택된 카테고리: **{', '.join(selected_categories)}**")
-        st.dataframe(filtered_trade_df.head())
-
+        st.write(f"선택된 카테고리: **{', '.join(selected_categories)}**"); st.dataframe(filtered_trade_df.head())
         st.subheader("2-2. 주(Week) 단위 데이터로 집계")
         if not filtered_trade_df.empty:
             filtered_trade_df.set_index('Date', inplace=True)
             trade_weekly = filtered_trade_df.resample('W-Mon').agg({'Value': 'sum', 'Volume': 'sum'})
             trade_weekly['Unit Price'] = trade_weekly['Value'] / trade_weekly['Volume']
             trade_weekly.columns = ['수입액(USD)', '수입량(KG)', '수입단가(USD/KG)']
-
+            
             wholesale_weekly = pd.DataFrame()
             if raw_wholesale_df is not None:
                 wholesale_df_processed = raw_wholesale_df.set_index('조사일자')
@@ -237,6 +266,9 @@ with tab2:
                 agg_dict = {col: 'mean' for col in price_cols}
                 if agg_dict:
                     wholesale_weekly = wholesale_df_processed.resample('W-Mon').agg(agg_dict)
+                    if '도매가격(원)' in wholesale_weekly.columns: # 환율 적용
+                        wholesale_weekly['도매가격(USD)'] = wholesale_weekly['도매가격(원)'] / 1350
+                        wholesale_weekly.drop(columns=['도매가격(원)'], inplace=True)
             
             search_weekly = pd.DataFrame()
             if not raw_search_df.empty:
@@ -248,8 +280,7 @@ with tab2:
             col1, col2 = st.columns(2)
             with col1: st.write("**Before (일별 수입량)**"); st.line_chart(filtered_trade_df['Volume'])
             with col2: st.write("**After (주별 수입량)**"); st.line_chart(trade_weekly['수입량(KG)'])
-        else:
-            st.warning("선택된 카테고리에 해당하는 데이터가 없습니다.")
+        else: st.warning("선택된 카테고리에 해당하는 데이터가 없습니다.")
 
 with tab3:
     st.header("3. 최종 통합 데이터셋")
@@ -265,6 +296,5 @@ with tab3:
         st.subheader("최종 데이터 시각화")
         fig = px.line(final_df, labels={'value': '값', 'index': '날짜', 'variable': '데이터 종류'}, title="최종 통합 데이터 시계열 추이")
         st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.warning("통합할 데이터가 없습니다. 2단계 표준화 과정을 먼저 확인해주세요.")
+    else: st.warning("통합할 데이터가 없습니다. 2단계 표준화 과정을 먼저 확인해주세요.")
 
