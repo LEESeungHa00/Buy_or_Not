@@ -38,7 +38,6 @@ def get_categories_from_bq(_client):
             df = _client.query(query).to_dataframe()
         return sorted(df['Category'].astype(str).unique())
     except Exception as e:
-        # 테이블이 아직 없을 수 있으므로 오류 대신 빈 리스트 반환
         print(f"Could not fetch categories (table might not exist yet): {e}")
         return []
 
@@ -61,48 +60,32 @@ def get_trade_data_from_bq(client, categories):
     except Exception as e:
         st.error(f"BigQuery에서 TDS 데이터를 읽는 중 오류 발생: {e}"); return pd.DataFrame()
 
-def deduplicate_and_write_to_bq(client, df_new, table_name, unique_subset=None):
-    """
-    BigQuery 테이블에 중복을 제거하여 데이터를 씁니다.
-    기존 데이터를 읽고, 새 데이터를 합친 후, 중복을 제거하고, 전체를 덮어씁니다.
-    """
+def deduplicate_and_write_to_bq(client, df_new, table_name):
+    """BigQuery 테이블에 중복을 제거하여 데이터를 씁니다."""
     project_id = client.project
     table_id = f"{project_id}.data_explorer.{table_name}"
-    
     try:
-        # 1. 기존 데이터 읽기
         try:
             sql = f"SELECT * FROM `{table_id}`"
             df_existing = client.query(sql).to_dataframe()
         except Exception:
-            df_existing = pd.DataFrame() # 테이블이 없으면 빈 데이터프레임
+            df_existing = pd.DataFrame()
 
-        # 2. 새 데이터와 결합
         df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-
-        # 3. 중복 제거
-        # 모든 열이 완전히 동일한 경우에만 중복으로 간주
         df_deduplicated = df_combined.drop_duplicates()
 
-        # 4. BigQuery에 덮어쓰기
         with st.spinner(f"중복을 제거한 데이터를 BigQuery '{table_name}' 테이블에 저장하는 중..."):
             pandas_gbq.to_gbq(df_deduplicated, table_id, project_id=project_id, if_exists="replace", credentials=client._credentials)
-        
         st.success(f"데이터가 BigQuery '{table_name}' 테이블에 성공적으로 저장/업데이트되었습니다.")
-
     except Exception as e:
         st.error(f"BigQuery에 데이터를 저장하는 중 오류 발생: {e}")
 
-
 def add_trade_data_to_bq(client, df):
     """새로운 수출입 데이터를 BigQuery 테이블에 중복 없이 추가합니다."""
-    # BigQuery 규칙에 맞게 컬럼 이름 변경
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = ['_'.join(map(str, col)).strip() for col in df.columns.values]
     df.columns = df.columns.str.replace(' ', '_').str.replace('[^A-Za-z0-9_]', '', regex=True)
-    
     deduplicate_and_write_to_bq(client, df, "tds_data")
-
 
 # (기타 API fetch 함수들은 기존과 동일하게 유지)
 def fetch_yfinance_data(tickers, start_date, end_date):
@@ -279,7 +262,7 @@ if st.sidebar.button("검색량 데이터 가져오기"):
 raw_search_df = st.session_state.get('search_data', pd.DataFrame())
 
 # --- Main Display Area ---
-tab1, tab2, tab3 = st.tabs(["1️⃣ 원본 데이터 확인", "2️⃣ 데이터 표준화", "3️⃣ 최종 통합 데이터"])
+tab1, tab2, tab3 = st.tabs(["1️⃣ 원본 데이터 확인", "2️⃣ 데이터 표준화", "3️⃣ 최종 통합 데이터 및 상관관계 분석"])
 with tab1:
     st.subheader("A. 수출입 데이터 (from BigQuery)"); 
     st.dataframe(raw_trade_df.head())
@@ -287,23 +270,29 @@ with tab1:
     st.subheader("C. 검색량 데이터"); st.dataframe(raw_search_df.head())
 
 with tab2:
-    if not selected_categories: st.warning("분석할 카테고리를 선택해주세요.")
+    st.header("2. 데이터 표준화: 같은 기준으로 데이터 맞춰주기")
+    if not selected_categories: 
+        st.warning("분석할 카테고리를 선택해주세요.")
     else:
         st.subheader("2-1. 분석 대상 품목 필터링")
         trade_df_in_range = raw_trade_df[(raw_trade_df['Date'] >= start_date) & (raw_trade_df['Date'] <= end_date)]
         filtered_trade_df = trade_df_in_range[trade_df_in_range['Category'].isin(selected_categories)].copy()
-        st.write(f"선택된 카테고리: **{', '.join(selected_categories)}**"); st.dataframe(filtered_trade_df.head())
+        
+        st.write(f"선택된 카테고리: **{', '.join(selected_categories)}**")
+        st.dataframe(filtered_trade_df.head())
         
         st.subheader("2-2. 주(Week) 단위 데이터로 집계")
         if not filtered_trade_df.empty:
             filtered_trade_df.set_index('Date', inplace=True)
-            value_col = 'Value'
-            volume_col = 'Volume'
+            value_col, volume_col = 'Value', 'Volume'
             
+            st.write("#### 수출입 데이터 (주별 집계)")
             trade_weekly = filtered_trade_df.resample('W-Mon').agg({value_col: 'sum', volume_col: 'sum'})
             trade_weekly['수입단가_USD_KG'] = trade_weekly[value_col] / trade_weekly[volume_col]
             trade_weekly.columns = ['수입액_USD', '수입량_KG', '수입단가_USD_KG']
-            
+            st.dataframe(trade_weekly.head())
+
+            st.write("#### 외부 가격 데이터 (주별 평균)")
             wholesale_weekly = pd.DataFrame()
             if not raw_wholesale_df.empty:
                 date_col = '조사일자' if '조사일자' in raw_wholesale_df.columns else '날짜'
@@ -316,33 +305,84 @@ with tab2:
                     if '도매가격_원' in wholesale_weekly.columns:
                         wholesale_weekly['도매가격_USD'] = wholesale_weekly['도매가격_원'] / 1350
                         wholesale_weekly.drop(columns=['도매가격_원'], inplace=True)
+            st.dataframe(wholesale_weekly.head())
             
+            st.write("#### 검색량 데이터 (주별 평균)")
             search_weekly = pd.DataFrame()
             if not raw_search_df.empty:
                 raw_search_df['날짜'] = pd.to_datetime(raw_search_df['날짜'], errors='coerce')
                 search_df_processed = raw_search_df.set_index('날짜')
                 numeric_cols = search_df_processed.select_dtypes(include=np.number).columns
                 search_weekly = search_df_processed.resample('W-Mon').agg({col: 'mean' for col in numeric_cols})
+            st.dataframe(search_weekly.head())
             
-            st.write("▼ 일별(Daily) vs 주별(Weekly) 수입량 비교")
-            col1, col2 = st.columns(2)
-            with col1: st.line_chart(filtered_trade_df[volume_col])
-            with col2: st.line_chart(trade_weekly['수입량_KG'])
-        else: st.warning("선택된 카테고리에 해당하는 데이터가 없습니다.")
+            st.session_state['trade_weekly'] = trade_weekly
+            st.session_state['wholesale_weekly'] = wholesale_weekly
+            st.session_state['search_weekly'] = search_weekly
+
+        else: 
+            st.warning("선택된 카테고리 및 기간에 해당하는 데이터가 없습니다.")
 
 with tab3:
-    if 'trade_weekly' in locals() and not trade_weekly.empty:
-        dfs_to_concat = [trade_weekly]
-        if 'wholesale_weekly' in locals() and not wholesale_weekly.empty: dfs_to_concat.append(wholesale_weekly)
-        if 'search_weekly' in locals() and not search_weekly.empty: dfs_to_concat.append(search_weekly)
+    st.header("3. 최종 통합 데이터 및 상관관계 분석")
+    trade_weekly = st.session_state.get('trade_weekly', pd.DataFrame())
+    wholesale_weekly = st.session_state.get('wholesale_weekly', pd.DataFrame())
+    search_weekly = st.session_state.get('search_weekly', pd.DataFrame())
+
+    if not trade_weekly.empty:
+        dfs_to_concat = [df for df in [trade_weekly, wholesale_weekly, search_weekly] if not df.empty]
         
         final_df = reduce(lambda left, right: pd.merge(left, right, left_index=True, right_index=True, how='outer'), dfs_to_concat)
         final_df = final_df.interpolate(method='linear', limit_direction='forward').dropna(how='all')
         
+        st.subheader("최종 통합 데이터셋")
         st.dataframe(final_df)
-        st.subheader("최종 통합 데이터 시각화")
+        st.subheader("통합 데이터 시각화")
         if not final_df.empty:
             fig = px.line(final_df, labels={'value': '값', 'index': '날짜', 'variable': '데이터 종류'}, title="최종 통합 데이터 시계열 추이")
             st.plotly_chart(fig, use_container_width=True)
-    else: st.warning("통합할 데이터가 없습니다.")
+
+        st.markdown("---")
+        st.subheader("상관관계 분석")
+
+        if len(final_df.columns) > 1:
+            st.write("#### 상관관계 히트맵")
+            corr_matrix = final_df.corr()
+            fig_heatmap = px.imshow(corr_matrix, text_auto=True, aspect="auto", 
+                                    color_continuous_scale='RdBu_r', range_color=[-1, 1],
+                                    title="전체 변수 간 상관관계 히트맵")
+            st.plotly_chart(fig_heatmap, use_container_width=True)
+
+            st.write("#### 시차별 상관관계 분석 (Cross-Correlation)")
+            col1_name = st.selectbox("기준 변수 선택 (Y축)", final_df.columns)
+            col2_name = st.selectbox("비교 변수 선택 (X축)", final_df.columns)
+            
+            max_lag = 12
+            lags = range(-max_lag, max_lag + 1)
+            
+            @st.cache_data
+            def calculate_cross_corr(df, col1, col2):
+                correlations = [df[col1].corr(df[col2].shift(lag)) for lag in lags]
+                return pd.DataFrame({'Lag (주)': lags, '상관계수': correlations})
+
+            if col1_name and col2_name:
+                cross_corr_df = calculate_cross_corr(final_df, col1_name, col2_name)
+                
+                fig_cross_corr = px.bar(cross_corr_df, x='Lag (주)', y='상관계수', 
+                                        title=f"'{col1_name}'와 '{col2_name}'의 시차별 상관관계",
+                                        labels={'Lag (주)': f"'{col2_name}'가 몇 주 선행/후행하는가", '상관계수': '상관계수'})
+                fig_cross_corr.add_hline(y=0)
+                st.plotly_chart(fig_cross_corr, use_container_width=True)
+                
+                st.info(
+                    f"""
+                    - **양수 Lag (+)**: '{col2_name}'가 '{col1_name}'보다 **나중에** 움직일 때의 상관관계를 의미합니다. (예: 수입량이 증가한 후, 몇 주 뒤에 가격이 오르는 경향)
+                    - **음수 Lag (-)**: '{col2_name}'가 '{col1_name}'보다 **먼저** 움직일 때의 상관관계를 의미합니다. (예: 검색량이 증가한 후, 몇 주 뒤에 수입량이 오르는 경향)
+                    - 막대가 가장 높은/낮은 지점이 두 변수 간의 영향력이 가장 큰 시차일 가능성이 높습니다.
+                    """
+                )
+        else:
+            st.warning("상관관계를 분석하려면 두 개 이상의 데이터 열이 필요합니다.")
+    else: 
+        st.warning("2단계 데이터 표준화 과정에서 처리된 데이터가 없습니다. 먼저 2단계를 확인해주세요.")
 
