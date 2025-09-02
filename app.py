@@ -11,12 +11,13 @@ import urllib.request
 import yfinance as yf
 
 # --- BigQuery Connection ---
-# st.connection은 secrets.toml의 [connections.gcp_bigquery] 설정을 자동으로 사용합니다.
+# st.connection의 이름을 secrets.toml의 [connections.gcp_bigquery]와 일치시킵니다.
 @st.cache_resource
 def get_bq_connection():
     """BigQuery에 연결하고 커넥션 객체를 반환합니다."""
     try:
-        return st.connection("gcp_bigquery")
+        # 이 이름은 secrets.toml의 [connections.gcp_bigquery] 섹션을 직접 가리킵니다.
+        return st.connection("gcp_bigquery", type="bigquery")
     except Exception as e:
         st.error(f"Google BigQuery 연결에 실패했습니다. secrets.toml 설정을 확인하세요: {e}")
         return None
@@ -25,7 +26,6 @@ def get_bq_connection():
 def get_trade_data_from_bq(conn):
     """BigQuery의 tds_data 테이블에서 데이터를 로드합니다."""
     try:
-        # 테이블의 전체 행 수를 먼저 확인
         count_query = "SELECT count(*) FROM `data_explorer.tds_data`"
         count_result = conn.query(count_query)
         total_rows = count_result.iloc[0,0]
@@ -33,7 +33,6 @@ def get_trade_data_from_bq(conn):
         with st.spinner(f"BigQuery에서 {total_rows:,}개의 행을 로드하는 중..."):
             df = conn.query("SELECT * FROM `data_explorer.tds_data`", ttl=600)
 
-        # BigQuery에서 로드 시 데이터 타입 변환
         for col in df.columns:
             if 'price' in col.lower() or 'value' in col.lower() or 'volume' in col.lower():
                 df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -47,7 +46,6 @@ def get_trade_data_from_bq(conn):
 def add_trade_data_to_bq(conn, df):
     """새로운 데이터를 BigQuery 테이블에 추가합니다."""
     try:
-        # BigQuery 규칙에 맞게 컬럼 이름 변경
         df.columns = df.columns.str.replace(' ', '_').str.replace('[^A-Za-z0-9_]', '', regex=True)
         with st.spinner("새 데이터를 BigQuery에 저장하는 중..."):
             # 테이블이 없으면 만들고, 있으면 데이터 추가
@@ -57,8 +55,7 @@ def add_trade_data_to_bq(conn, df):
         st.error(f"BigQuery에 데이터를 저장하는 중 오류 발생: {e}")
 
 
-# (기타 fetch 함수들은 BigQuery를 캐시로 사용하도록 수정하거나, 기존 로직 유지 가능)
-# (간결성을 위해 BigQuery 연동에 집중하고, 다른 API 함수들은 기존 코드 유지)
+# (기타 fetch 함수들은 기존과 동일하게 유지)
 def fetch_yfinance_data(tickers, start_date, end_date):
     all_data = []
     for name, ticker in tickers.items():
@@ -238,7 +235,6 @@ with tab2:
         st.subheader("2-2. 주(Week) 단위 데이터로 집계")
         if not filtered_trade_df.empty:
             filtered_trade_df.set_index('Date', inplace=True)
-            # BigQuery에서 온 컬럼 이름은 밑줄(_)로 되어 있을 수 있음
             value_col = 'Value' if 'Value' in filtered_trade_df.columns else 'Value'
             volume_col = 'Volume' if 'Volume' in filtered_trade_df.columns else 'Volume'
             
