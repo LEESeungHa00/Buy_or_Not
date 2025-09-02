@@ -43,20 +43,14 @@ def get_categories_from_bq(_client):
 
 def get_trade_data_from_bq(client, categories):
     """BigQuery의 tds_data 테이블에서 선택된 카테고리의 데이터만 로드합니다."""
-    if not categories:
-        return pd.DataFrame()
-    project_id = client.project
-    table_id = f"{project_id}.data_explorer.tds_data"
+    if not categories: return pd.DataFrame()
+    project_id = client.project; table_id = f"{project_id}.data_explorer.tds_data"
     try:
-        # SQL Injection을 방지하기 위해 파라미터화된 쿼리를 사용합니다.
         query_params = [bigquery.ArrayQueryParameter("categories", "STRING", categories)]
         sql = f"SELECT * FROM `{table_id}` WHERE Category IN UNNEST(@categories)"
         job_config = bigquery.QueryJobConfig(query_parameters=query_params)
-
         with st.spinner(f"BigQuery에서 선택된 {len(categories)}개 카테고리 데이터를 로드하는 중..."):
             df = client.query(sql, job_config=job_config).to_dataframe()
-
-        # 데이터 타입 변환
         for col in df.columns:
             if 'price' in col.lower() or 'value' in col.lower() or 'volume' in col.lower():
                 df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -64,35 +58,68 @@ def get_trade_data_from_bq(client, categories):
                 df[col] = pd.to_datetime(df[col], errors='coerce')
         return df
     except Exception as e:
-        st.error(f"BigQuery에서 TDS 데이터를 읽는 중 오류 발생: {e}")
-        return pd.DataFrame()
+        st.error(f"BigQuery에서 TDS 데이터를 읽는 중 오류 발생: {e}"); return pd.DataFrame()
 
-def add_trade_data_to_bq(client, df):
-    """새로운 데이터를 BigQuery 테이블에 추가합니다."""
+def add_data_to_bq(client, df, table_name): # --- [FIX] Generic function to add data ---
+    """새로운 데이터를 지정된 BigQuery 테이블에 추가합니다."""
     project_id = client.project
-    table_id = f"{project_id}.data_explorer.tds_data"
+    table_id = f"{project_id}.data_explorer.{table_name}"
     try:
         df.columns = df.columns.str.replace(' ', '_').str.replace('[^A-Za-z0-9_]', '', regex=True)
-        with st.spinner("새 데이터를 BigQuery에 저장하는 중..."):
+        with st.spinner(f"새 데이터를 BigQuery '{table_name}' 테이블에 저장하는 중..."):
             pandas_gbq.to_gbq(df, table_id, project_id=project_id, if_exists="append", credentials=client._credentials)
-        st.success("새 데이터가 BigQuery에 성공적으로 저장되었습니다.")
+        st.success(f"새 데이터가 BigQuery '{table_name}' 테이블에 성공적으로 저장되었습니다.")
     except Exception as e:
         st.error(f"BigQuery에 데이터를 저장하는 중 오류 발생: {e}")
 
-# (기타 API fetch 함수들은 기존과 동일하게 유지)
-def fetch_yfinance_data(tickers, start_date, end_date):
+
+# --- API Fetching with BigQuery Caching ---
+def fetch_yfinance_data(client, tickers, start_date, end_date):
+    project_id = client.project; table_name = "yfinance_cache"
+    table_id = f"{project_id}.data_explorer.{table_name}"
     all_data = []
+
     for name, ticker in tickers.items():
-        data = yf.download(ticker, start=start_date, end=end_date, progress=False)
-        if not data.empty:
-            df = data[['Close']].copy().reset_index().rename(columns={'Date': '조사일자', 'Close': f'{name}_선물가격_USD'})
-            all_data.append(df)
+        try:
+            sql = f"SELECT Date AS 조사일자, Close AS Price FROM `{table_id}` WHERE Ticker = '{ticker}' AND Date >= '{start_date}' AND Date <= '{end_date}'"
+            df_cache = client.query(sql).to_dataframe()
+            if len(df_cache) >= (end_date - start_date).days * 0.9:
+                st.sidebar.info(f"'{name}' 데이터를 BigQuery 캐시에서 로드했습니다.")
+                all_data.append(df_cache.rename(columns={'Price': f'{name}_선물가격_USD'}))
+                continue
+        except Exception: pass
+
+        with st.spinner(f"'{name}' 데이터를 Yahoo Finance API에서 가져오는 중..."):
+            data = yf.download(ticker, start=start_date, end=end_date, progress=False)
+            if not data.empty:
+                df = data[['Close']].copy().reset_index()
+                df['Ticker'] = ticker
+                add_data_to_bq(client, df.rename(columns={'Date': 'Date', 'Close': 'Close'}), table_name=table_name)
+                all_data.append(df.rename(columns={'Date': '조사일자', 'Close': f'{name}_선물가격_USD'}))
+            else:
+                st.sidebar.warning(f"'{name}'에 대한 API 데이터가 없습니다.")
+
     if not all_data: return pd.DataFrame()
     return reduce(lambda left, right: pd.merge(left, right, on='조사일자', how='outer'), all_data)
 
-def fetch_trends_data(keywords, start_date, end_date, naver_keys):
+
+def fetch_trends_data(client, keywords, start_date, end_date, naver_keys):
+    project_id = client.project; table_name = "trends_cache"
+    table_id = f"{project_id}.data_explorer.{table_name}"
     all_data = []
+
     for keyword in keywords:
+        try:
+            sql = f"SELECT * FROM `{table_id}` WHERE Keyword = '{keyword}' AND 날짜 >= '{start_date}' AND 날짜 <= '{end_date}'"
+            df_cache = client.query(sql).to_dataframe()
+            if len(df_cache) >= (end_date - start_date).days * 0.9:
+                st.sidebar.info(f"'{keyword}' 검색량 데이터를 BigQuery 캐시에서 로드했습니다.")
+                reshaped_df = df_cache.pivot(index='날짜', columns='Source', values='Value').reset_index()
+                reshaped_df.columns = ['날짜'] + [f'{col}_{keyword}' for col in reshaped_df.columns if col != '날짜']
+                all_data.append(reshaped_df)
+                continue
+        except Exception: pass
+        
         keyword_dfs = []
         with st.spinner(f"'{keyword}' 검색량 데이터를 API에서 가져오는 중..."):
             pytrends = TrendReq(hl='ko-KR', tz=540)
@@ -116,12 +143,21 @@ def fetch_trends_data(keywords, start_date, end_date, naver_keys):
                     keyword_dfs.append(naver_df)
             
             if keyword_dfs:
-                all_data.append(reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), keyword_dfs))
+                merged_df = reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), keyword_dfs)
+                all_data.append(merged_df)
+                
+                # Reshape for caching
+                df_to_cache = merged_df.melt(id_vars=['날짜'], var_name='Source', value_name='Value')
+                df_to_cache[['Source', 'Keyword']] = df_to_cache['Source'].str.split('_', expand=True)
+                add_data_to_bq(client, df_to_cache, table_name=table_name)
+
 
     if not all_data: return pd.DataFrame()
     return reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), all_data)
 
-def fetch_kamis_data(item_info, start_date, end_date, kamis_keys):
+
+def fetch_kamis_data(client, item_info, start_date, end_date, kamis_keys):
+    # (KAMIS data is volatile and API is per-day, so fetching fresh is often better)
     all_data = []
     date_range = pd.date_range(start=start_date, end=end_date)
     if len(date_range) > 180: st.sidebar.warning(f"KAMIS 조회 기간이 {len(date_range)}일로 깁니다. 오래 걸릴 수 있습니다.")
@@ -175,13 +211,11 @@ if not st.session_state.categories:
     if uploaded_file:
         if st.sidebar.button("업로드 파일 BigQuery에 저장"):
             df_new = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
-            add_trade_data_to_bq(bq_client, df_new)
-            st.session_state.clear() # Clear state to force reload all
+            add_data_to_bq(bq_client, df_new, table_name="tds_data")
+            st.session_state.clear()
             st.rerun()
     st.stop()
 
-
-# --- Main App Logic (Separated into two stages) ---
 if not st.session_state.data_loaded:
     st.sidebar.subheader("1. 분석 대상 설정")
     selected_categories = st.sidebar.multiselect("분석할 품목 카테고리 선택", st.session_state.categories)
@@ -205,7 +239,7 @@ raw_trade_df = st.session_state.raw_trade_df
 selected_categories = st.session_state.selected_categories
 
 st.sidebar.success(f"**{', '.join(selected_categories)}** 카테고리 데이터 로드 완료!")
-st.sidebar.markdown("---") # Divider
+st.sidebar.markdown("---")
 
 try:
     file_start_date, file_end_date = raw_trade_df['Date'].min(), raw_trade_df['Date'].max()
@@ -227,7 +261,7 @@ is_coffee_selected = any('커피' in str(cat) for cat in selected_categories)
 if is_coffee_selected:
     st.sidebar.info("Yahoo Finance에서 선물가격을 가져옵니다.")
     if st.sidebar.button("선물가격 데이터 가져오기"):
-        df = fetch_yfinance_data(COFFEE_TICKERS_YFINANCE, start_date, end_date)
+        df = fetch_yfinance_data(bq_client, COFFEE_TICKERS_YFINANCE, start_date, end_date)
         st.session_state['wholesale_data'] = df
 else:
     st.sidebar.info("KAMIS에서 농산물 도매가격 데이터를 가져옵니다.")
@@ -239,7 +273,7 @@ else:
         if st.sidebar.button("KAMIS 데이터 가져오기"):
             if kamis_api_key and kamis_api_id:
                 item_info = {'item_code': KAMIS_ITEMS[cat_name][item_name], 'cat_code': KAMIS_CATEGORIES[cat_name]}
-                df = fetch_kamis_data(item_info, start_date, end_date, {'key': kamis_api_key, 'id': kamis_api_id})
+                df = fetch_kamis_data(bq_client, item_info, start_date, end_date, {'key': kamis_api_key, 'id': kamis_api_id})
                 st.session_state['wholesale_data'] = df
             else: st.sidebar.error("KAMIS API Key와 ID를 모두 입력해주세요.")
 raw_wholesale_df = st.session_state.get('wholesale_data', pd.DataFrame())
@@ -251,7 +285,7 @@ naver_client_secret = st.sidebar.text_input("Naver API Client Secret", type="pas
 if st.sidebar.button("검색량 데이터 가져오기"):
     if not search_keywords: st.sidebar.warning("검색어를 먼저 입력해주세요.")
     else:
-        df = fetch_trends_data(search_keywords, start_date, end_date, {'id': naver_client_id, 'secret': naver_client_secret})
+        df = fetch_trends_data(bq_client, search_keywords, start_date, end_date, {'id': naver_client_id, 'secret': naver_client_secret})
         st.session_state['search_data'] = df
 raw_search_df = st.session_state.get('search_data', pd.DataFrame())
 
@@ -268,15 +302,14 @@ with tab2:
     else:
         st.subheader("2-1. 분석 대상 품목 필터링")
         trade_df_in_range = raw_trade_df[(raw_trade_df['Date'] >= start_date) & (raw_trade_df['Date'] <= end_date)]
-        # This filter is now redundant as data is pre-filtered, but good for date range selection
         filtered_trade_df = trade_df_in_range[trade_df_in_range['Category'].isin(selected_categories)].copy()
         st.write(f"선택된 카테고리: **{', '.join(selected_categories)}**"); st.dataframe(filtered_trade_df.head())
         
         st.subheader("2-2. 주(Week) 단위 데이터로 집계")
         if not filtered_trade_df.empty:
             filtered_trade_df.set_index('Date', inplace=True)
-            value_col = 'Value' if 'Value' in filtered_trade_df.columns else 'Value'
-            volume_col = 'Volume' if 'Volume' in filtered_trade_df.columns else 'Volume'
+            value_col = 'Value'
+            volume_col = 'Volume'
             
             trade_weekly = filtered_trade_df.resample('W-Mon').agg({value_col: 'sum', volume_col: 'sum'})
             trade_weekly['수입단가_USD_KG'] = trade_weekly[value_col] / trade_weekly[volume_col]
