@@ -9,134 +9,79 @@ from pytrends.request import TrendReq
 import json
 import urllib.request
 import yfinance as yf
-import gspread
-from google.oauth2.service_account import Credentials
-import time
 
-# --- Google Sheets Connection ---
+# --- BigQuery Connection ---
+# st.connection은 secrets.toml의 [connections.gcp_bigquery] 설정을 자동으로 사용합니다.
 @st.cache_resource
-def get_gspread_client():
-    """Google Sheets 클라이언트를 초기화하고 반환합니다."""
+def get_bq_connection():
+    """BigQuery에 연결하고 커넥션 객체를 반환합니다."""
     try:
-        creds = Credentials.from_service_account_info(
-            st.secrets["gcp_service_account"],
-            scopes=[
-                "https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive",
-            ],
-        )
-        return gspread.authorize(creds)
+        return st.connection("gcp_bigquery")
     except Exception as e:
-        st.error(f"Google Sheets 인증에 실패했습니다. st.secrets 설정을 확인하세요: {e}")
+        st.error(f"Google BigQuery 연결에 실패했습니다. secrets.toml 설정을 확인하세요: {e}")
         return None
 
-@st.cache_data(ttl=600)
-def read_gsheet(_gs_client, sheet_name):
-    """지정된 시트에서 모든 데이터를 읽어 DataFrame으로 반환합니다. (대용량 데이터 최적화)"""
+# --- Data Fetching & Processing Functions (BigQuery Version) ---
+def get_trade_data_from_bq(conn):
+    """BigQuery의 tds_data 테이블에서 데이터를 로드합니다."""
     try:
-        spreadsheet = _gs_client.open_by_key(st.secrets["google_sheet_key"])
-        worksheet = spreadsheet.worksheet(sheet_name)
-        with st.spinner(f"'{sheet_name}' 시트에서 대용량 데이터를 읽는 중..."):
-            all_values = worksheet.get_all_values()
-        if not all_values or len(all_values) < 2:
-            return pd.DataFrame()
-        header = all_values[0]
-        data = all_values[1:]
-        df = pd.DataFrame(data, columns=header)
-        # 데이터 타입 변환 (숫자형, 날짜형 등)
+        # 테이블의 전체 행 수를 먼저 확인
+        count_query = "SELECT count(*) FROM `data_explorer.tds_data`"
+        count_result = conn.query(count_query)
+        total_rows = count_result.iloc[0,0]
+        
+        with st.spinner(f"BigQuery에서 {total_rows:,}개의 행을 로드하는 중..."):
+            df = conn.query("SELECT * FROM `data_explorer.tds_data`", ttl=600)
+
+        # BigQuery에서 로드 시 데이터 타입 변환
         for col in df.columns:
-            if '가격' in col or '량' in col or '액' in col or 'Price' in col or 'Value' in col or 'Volume' in col:
+            if 'price' in col.lower() or 'value' in col.lower() or 'volume' in col.lower():
                 df[col] = pd.to_numeric(df[col], errors='coerce')
-            elif '일자' in col or 'Date' in col or '날짜' in col:
+            elif 'date' in col.lower():
                 df[col] = pd.to_datetime(df[col], errors='coerce')
         return df
-    except gspread.exceptions.WorksheetNotFound:
-        return pd.DataFrame()
     except Exception as e:
-        st.warning(f"'{sheet_name}' 시트를 읽는 중 오류 발생: {e}")
+        st.error(f"BigQuery에서 TDS 데이터를 읽는 중 오류 발생: {e}")
         return pd.DataFrame()
 
-def update_gsheet(client, sheet_name, df_to_add):
-    """지정된 시트에 새로운 데이터를 추가합니다. 헤더는 필요 시 한 번만 기록합니다."""
-    if df_to_add.empty: return
+def add_trade_data_to_bq(conn, df):
+    """새로운 데이터를 BigQuery 테이블에 추가합니다."""
     try:
-        spreadsheet = client.open_by_key(st.secrets["google_sheet_key"])
-        try:
-            worksheet = spreadsheet.worksheet(sheet_name)
-            if not worksheet.get_all_records(numericise_ignore=['all']):
-                 worksheet.update([df_to_add.columns.values.tolist()])
-        except gspread.exceptions.WorksheetNotFound:
-            worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=1, cols=len(df_to_add.columns))
-            worksheet.update([df_to_add.columns.values.tolist()])
-        worksheet.append_rows(df_to_add.astype(str).values.tolist(), value_input_option='USER_ENTERED')
+        # BigQuery 규칙에 맞게 컬럼 이름 변경
+        df.columns = df.columns.str.replace(' ', '_').str.replace('[^A-Za-z0-9_]', '', regex=True)
+        with st.spinner("새 데이터를 BigQuery에 저장하는 중..."):
+            # 테이블이 없으면 만들고, 있으면 데이터 추가
+            conn.write_df(df, "data_explorer.tds_data", if_exists="append")
+        st.success("새 데이터가 BigQuery에 성공적으로 저장되었습니다.")
     except Exception as e:
-        st.error(f"'{sheet_name}' 시트 업데이트 중 오류 발생: {e}")
+        st.error(f"BigQuery에 데이터를 저장하는 중 오류 발생: {e}")
 
-# --- Data Fetching & Processing Functions ---
-def process_new_trade_data(gs_client, uploaded_file):
-    """새로 업로드된 파일을 처리하고 Google Sheet에 저장합니다."""
-    sheet_name = "TDS"
-    try:
-        df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
-        if 'Date' not in df.columns or 'Category' not in df.columns:
-            st.error("업로드된 파일에 'Date'와 'Category' 컬럼이 모두 필요합니다."); return None
-        df['Date'] = pd.to_datetime(df['Date'])
-        with st.spinner(f"'{uploaded_file.name}'을 Google Sheet에 저장 중..."):
-            update_gsheet(gs_client, sheet_name, df)
-        st.sidebar.success(f"'{uploaded_file.name}'을 Google Sheet에 저장했습니다.")
-        return df
-    except Exception as e:
-        st.error(f"파일 처리 중 오류: {e}"); return None
 
-def fetch_yfinance_data(gs_client, tickers, start_date, end_date):
-    sheet_name = "yfinance"
+# (기타 fetch 함수들은 BigQuery를 캐시로 사용하도록 수정하거나, 기존 로직 유지 가능)
+# (간결성을 위해 BigQuery 연동에 집중하고, 다른 API 함수들은 기존 코드 유지)
+def fetch_yfinance_data(tickers, start_date, end_date):
     all_data = []
-    df_sheet = read_gsheet(gs_client, sheet_name)
-
     for name, ticker in tickers.items():
-        if not df_sheet.empty and 'Ticker' in df_sheet.columns:
-            cached_data = df_sheet[(df_sheet['Ticker'] == ticker) & (df_sheet['조사일자'] >= start_date) & (df_sheet['조사일자'] <= end_date)]
-            if len(cached_data) >= (end_date - start_date).days * 0.8:
-                 st.sidebar.info(f"'{name}' 데이터를 Google Sheet에서 로드했습니다.")
-                 all_data.append(cached_data.rename(columns={'Price': f'{name} 선물가격(USD)'})[['조사일자', f'{name} 선물가격(USD)']])
-                 continue
-        with st.spinner(f"'{name}' 데이터를 Yahoo Finance API에서 가져오는 중..."):
-            data = yf.download(ticker, start=start_date, end=end_date, progress=False)
-            if not data.empty:
-                df = data[['Close']].copy().reset_index().rename(columns={'Date': '조사일자', 'Close': 'Price'})
-                df['Ticker'] = ticker
-                update_gsheet(gs_client, sheet_name, df)
-                all_data.append(df.rename(columns={'Price': f'{name} 선물가격(USD)'})[['조사일자', f'{name} 선물가격(USD)']])
-            else: st.sidebar.warning(f"'{name}'에 대한 API 데이터가 없습니다.")
-
+        data = yf.download(ticker, start=start_date, end=end_date, progress=False)
+        if not data.empty:
+            df = data[['Close']].copy().reset_index().rename(columns={'Date': '조사일자', 'Close': f'{name}_선물가격_USD'})
+            all_data.append(df)
     if not all_data: return pd.DataFrame()
     return reduce(lambda left, right: pd.merge(left, right, on='조사일자', how='outer'), all_data)
 
-def fetch_trends_data(gs_client, keywords, start_date, end_date, naver_keys):
-    sheet_name = "네이버데이터랩"
+def fetch_trends_data(keywords, start_date, end_date, naver_keys):
     all_data = []
-    df_sheet = read_gsheet(gs_client, sheet_name)
-    
     for keyword in keywords:
-        google_col, naver_col = f'Google_{keyword}', f'Naver_{keyword}'
-        if not df_sheet.empty and '날짜' in df_sheet.columns and (google_col in df_sheet.columns or naver_col in df_sheet.columns):
-            cached_data = df_sheet[(df_sheet['날짜'] >= start_date) & (df_sheet['날짜'] <= end_date)]
-            if not cached_data.empty:
-                 st.sidebar.info(f"'{keyword}' 검색량 데이터를 Google Sheet에서 로드했습니다.")
-                 cols_to_use = ['날짜']
-                 if google_col in cached_data.columns: cols_to_use.append(google_col)
-                 if naver_col in cached_data.columns: cols_to_use.append(naver_col)
-                 all_data.append(cached_data[cols_to_use])
-                 continue
+        keyword_dfs = []
         with st.spinner(f"'{keyword}' 검색량 데이터를 API에서 가져오는 중..."):
-            keyword_dfs = []
             pytrends = TrendReq(hl='ko-KR', tz=540)
             timeframe = f"{start_date.strftime('%Y-%m-%d')} {end_date.strftime('%Y-%m-%d')}"
             pytrends.build_payload([keyword], cat=0, timeframe=timeframe, geo='KR', gprop='')
             google_df = pytrends.interest_over_time()
             if not google_df.empty and keyword in google_df.columns:
-                google_df_renamed = google_df.reset_index().rename(columns={'date': '날짜', keyword: google_col})
-                keyword_dfs.append(google_df_renamed[['날짜', google_col]])
+                google_df_renamed = google_df.reset_index().rename(columns={'date': '날짜', keyword: f'Google_{keyword}'})
+                keyword_dfs.append(google_df_renamed)
+
             if naver_keys['id'] and naver_keys['secret']:
                 url = "https://openapi.naver.com/v1/datalab/search"
                 body = json.dumps({"startDate": start_date.strftime('%Y-%m-%d'), "endDate": end_date.strftime('%Y-%m-%d'), "timeUnit": "date", "keywordGroups": [{"groupName": keyword, "keywords": [keyword]}]})
@@ -145,18 +90,17 @@ def fetch_trends_data(gs_client, keywords, start_date, end_date, naver_keys):
                 response = urllib.request.urlopen(request, data=body.encode("utf-8"))
                 if response.getcode() == 200:
                     naver_raw = json.loads(response.read().decode('utf-8'))
-                    naver_df = pd.DataFrame(naver_raw['results'][0]['data']).rename(columns={'period': '날짜', 'ratio': naver_col})
+                    naver_df = pd.DataFrame(naver_raw['results'][0]['data']).rename(columns={'period': '날짜', 'ratio': f'Naver_{keyword}'})
                     naver_df['날짜'] = pd.to_datetime(naver_df['날짜'])
                     keyword_dfs.append(naver_df)
+            
             if keyword_dfs:
-                merged_keyword_df = reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), keyword_dfs)
-                all_data.append(merged_keyword_df)
-                update_gsheet(gs_client, sheet_name, merged_keyword_df)
+                all_data.append(reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), keyword_dfs))
 
     if not all_data: return pd.DataFrame()
     return reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), all_data)
 
-def fetch_kamis_data(gs_client, item_info, start_date, end_date, kamis_keys):
+def fetch_kamis_data(item_info, start_date, end_date, kamis_keys):
     all_data = []
     date_range = pd.date_range(start=start_date, end=end_date)
     if len(date_range) > 180: st.sidebar.warning(f"KAMIS 조회 기간이 {len(date_range)}일로 깁니다. 오래 걸릴 수 있습니다.")
@@ -175,7 +119,7 @@ def fetch_kamis_data(gs_client, item_info, start_date, end_date, kamis_keys):
                 if items:
                     price_str = items[0].get('dpr1', '0').replace(',', '')
                     if price_str.isdigit() and int(price_str) > 0:
-                        all_data.append({'조사일자': date, '도매가격(원)': int(price_str)})
+                        all_data.append({'조사일자': date, '도매가격_원': int(price_str)})
         except Exception: continue
         finally: progress_bar.progress((i + 1) / len(date_range), text=f"KAMIS 데이터 조회 중... {date_str}")
     
@@ -191,34 +135,33 @@ KAMIS_ITEMS = {"채소류": {"배추": "111", "무": "112", "양파": "114", "�
 
 # --- Streamlit App ---
 st.set_page_config(layout="wide")
-st.title("📊 데이터 탐색 및 통합 대시보드 (Google Sheets 연동)")
+st.title("📊 데이터 탐색 및 통합 대시보드 (Google BigQuery 연동)")
 
-gs_client = get_gspread_client()
-if gs_client is None: st.stop()
+bq_conn = get_bq_connection()
+if bq_conn is None: st.stop()
 
 st.sidebar.header("⚙️ 분석 설정")
 
-# --- [FIX] App Startup Workflow ---
+# --- App Startup Workflow (BigQuery Version) ---
 if 'data_loaded' not in st.session_state:
     st.session_state.data_loaded = False
 
-# Show button to start the app and load data
 if not st.session_state.data_loaded:
-    if st.sidebar.button("🚀 데이터 분석 시작하기 (TDS 시트 불러오기)"):
-        st.session_state.raw_trade_df = read_gsheet(gs_client, "TDS")
+    if st.sidebar.button("🚀 데이터 분석 시작하기 (BigQuery에서 불러오기)"):
+        st.session_state.raw_trade_df = get_trade_data_from_bq(bq_conn)
         if st.session_state.raw_trade_df is not None and not st.session_state.raw_trade_df.empty:
             st.session_state.data_loaded = True
             st.rerun()
         else:
-            st.sidebar.error("TDS 시트에서 데이터를 불러오지 못했습니다. 시트가 비어있거나 접근 권한을 확인하세요.")
+            st.sidebar.error("BigQuery에서 데이터를 불러오지 못했습니다. 테이블이 비어있거나 접근 권한을 확인하세요.")
     else:
         st.info("👈 사이드바의 '데이터 분석 시작하기' 버튼을 눌러주세요.")
-        # UI for adding new data when no data is loaded yet
         st.sidebar.subheader("또는, 새 수출입 데이터 추가")
-        uploaded_file = st.sidebar.file_uploader("새 파일 업로드하여 TDS 시트에 추가", type=['csv', 'xlsx'])
+        uploaded_file = st.sidebar.file_uploader("새 파일 업로드하여 BigQuery에 추가", type=['csv', 'xlsx'])
         if uploaded_file:
-            if st.sidebar.button("업로드 파일 시트에 저장"):
-                process_new_trade_data(gs_client, uploaded_file)
+            if st.sidebar.button("업로드 파일 BigQuery에 저장"):
+                df_new = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
+                add_trade_data_to_bq(bq_conn, df_new)
                 st.session_state.data_loaded = False # Reset state to force reload
                 st.rerun()
         st.stop()
@@ -226,7 +169,6 @@ if not st.session_state.data_loaded:
 # --- Main App Logic (runs only after data is loaded) ---
 raw_trade_df = st.session_state.raw_trade_df
 
-# 4. If data exists, proceed with the analysis UI
 st.sidebar.subheader("2. 분석 대상 설정")
 try:
     file_start_date, file_end_date = raw_trade_df['Date'].min(), raw_trade_df['Date'].max()
@@ -249,7 +191,7 @@ is_coffee_selected = any('커피' in str(cat) for cat in selected_categories)
 if is_coffee_selected:
     st.sidebar.info("Yahoo Finance에서 선물가격을 가져옵니다.")
     if st.sidebar.button("선물가격 데이터 가져오기"):
-        df = fetch_yfinance_data(gs_client, COFFEE_TICKERS_YFINANCE, start_date, end_date)
+        df = fetch_yfinance_data(COFFEE_TICKERS_YFINANCE, start_date, end_date)
         st.session_state['wholesale_data'] = df
 else:
     st.sidebar.info("KAMIS에서 농산물 도매가격 데이터를 가져옵니다.")
@@ -261,7 +203,7 @@ else:
         if st.sidebar.button("KAMIS 데이터 가져오기"):
             if kamis_api_key and kamis_api_id:
                 item_info = {'item_code': KAMIS_ITEMS[cat_name][item_name], 'cat_code': KAMIS_CATEGORIES[cat_name]}
-                df = fetch_kamis_data(gs_client, item_info, start_date, end_date, {'key': kamis_api_key, 'id': kamis_api_id})
+                df = fetch_kamis_data(item_info, start_date, end_date, {'key': kamis_api_key, 'id': kamis_api_id})
                 st.session_state['wholesale_data'] = df
             else: st.sidebar.error("KAMIS API Key와 ID를 모두 입력해주세요.")
 raw_wholesale_df = st.session_state.get('wholesale_data', pd.DataFrame())
@@ -273,14 +215,15 @@ naver_client_secret = st.sidebar.text_input("Naver API Client Secret", type="pas
 if st.sidebar.button("검색량 데이터 가져오기"):
     if not search_keywords: st.sidebar.warning("검색어를 먼저 입력해주세요.")
     else:
-        df = fetch_trends_data(gs_client, search_keywords, start_date, end_date, {'id': naver_client_id, 'secret': naver_client_secret})
+        df = fetch_trends_data(search_keywords, start_date, end_date, {'id': naver_client_id, 'secret': naver_client_secret})
         st.session_state['search_data'] = df
 raw_search_df = st.session_state.get('search_data', pd.DataFrame())
 
 # --- Main Display Area ---
 tab1, tab2, tab3 = st.tabs(["1️⃣ 원본 데이터 확인", "2️⃣ 데이터 표준화", "3️⃣ 최종 통합 데이터"])
 with tab1:
-    st.subheader("A. 수출입 데이터"); st.dataframe(raw_trade_df.head())
+    st.subheader("A. 수출입 데이터 (from BigQuery)"); 
+    st.dataframe(raw_trade_df.head())
     st.subheader("B. 외부 가격 데이터"); st.dataframe(raw_wholesale_df.head())
     st.subheader("C. 검색량 데이터"); st.dataframe(raw_search_df.head())
 
@@ -295,9 +238,13 @@ with tab2:
         st.subheader("2-2. 주(Week) 단위 데이터로 집계")
         if not filtered_trade_df.empty:
             filtered_trade_df.set_index('Date', inplace=True)
-            trade_weekly = filtered_trade_df.resample('W-Mon').agg({'Value': 'sum', 'Volume': 'sum'})
-            trade_weekly['Unit Price'] = trade_weekly['Value'] / trade_weekly['Volume']
-            trade_weekly.columns = ['수입액(USD)', '수입량(KG)', '수입단가(USD/KG)']
+            # BigQuery에서 온 컬럼 이름은 밑줄(_)로 되어 있을 수 있음
+            value_col = 'Value' if 'Value' in filtered_trade_df.columns else 'Value'
+            volume_col = 'Volume' if 'Volume' in filtered_trade_df.columns else 'Volume'
+            
+            trade_weekly = filtered_trade_df.resample('W-Mon').agg({value_col: 'sum', volume_col: 'sum'})
+            trade_weekly['수입단가_USD_KG'] = trade_weekly[value_col] / trade_weekly[volume_col]
+            trade_weekly.columns = ['수입액_USD', '수입량_KG', '수입단가_USD_KG']
             
             wholesale_weekly = pd.DataFrame()
             if not raw_wholesale_df.empty:
@@ -308,9 +255,9 @@ with tab2:
                 agg_dict = {col: 'mean' for col in price_cols}
                 if agg_dict:
                     wholesale_weekly = wholesale_df_processed.resample('W-Mon').agg(agg_dict)
-                    if '도매가격(원)' in wholesale_weekly.columns:
-                        wholesale_weekly['도매가격(USD)'] = wholesale_weekly['도매가격(원)'] / 1350
-                        wholesale_weekly.drop(columns=['도매가격(원)'], inplace=True)
+                    if '도매가격_원' in wholesale_weekly.columns:
+                        wholesale_weekly['도매가격_USD'] = wholesale_weekly['도매가격_원'] / 1350
+                        wholesale_weekly.drop(columns=['도매가격_원'], inplace=True)
             
             search_weekly = pd.DataFrame()
             if not raw_search_df.empty:
@@ -321,8 +268,8 @@ with tab2:
             
             st.write("▼ 일별(Daily) vs 주별(Weekly) 수입량 비교")
             col1, col2 = st.columns(2)
-            with col1: st.line_chart(filtered_trade_df['Volume'])
-            with col2: st.line_chart(trade_weekly['수입량(KG)'])
+            with col1: st.line_chart(filtered_trade_df[volume_col])
+            with col2: st.line_chart(trade_weekly['수입량_KG'])
         else: st.warning("선택된 카테고리에 해당하는 데이터가 없습니다.")
 
 with tab3:
