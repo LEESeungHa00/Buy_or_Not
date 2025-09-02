@@ -17,3 +17,4 @@ pytrends
 requests
 plotly-express
 openpyxl
+yfinance
