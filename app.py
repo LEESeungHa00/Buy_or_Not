@@ -9,45 +9,25 @@ from functools import reduce
 from pytrends.request import TrendReq
 import json
 import urllib.request
+import yfinance as yf
 
-# --- Web Scraping Function ---
-@st.cache_data(ttl=3600) # 데이터를 1시간 동안 캐싱
-def fetch_investing_data(index_name, url):
-    """investing.com에서 지정된 상품의 과거 데이터를 스크래핑합니다."""
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    }
+# --- Data Fetching Functions ---
+@st.cache_data(ttl=3600)
+def fetch_yfinance_data(ticker, name, start_date, end_date):
+    """Yahoo Finance에서 지정된 티커의 과거 데이터를 가져옵니다."""
     try:
-        response = requests.get(url, headers=headers, timeout=15)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        table = soup.find('table', {'data-test': 'historical-data-table'})
-        if not table:
-            st.error(f"Investing.com 페이지({index_name})에서 데이터 테이블을 찾지 못했습니다.")
+        data = yf.download(ticker, start=start_date, end=end_date, progress=False)
+        if data.empty:
+            st.warning(f"'{name}({ticker})'에 대한 Yahoo Finance 데이터가 없습니다.")
             return None
-
-        dates, prices = [], []
-        for row in table.find('tbody').find_all('tr'):
-            cells = row.find_all('td')
-            if len(cells) > 1:
-                date_str = cells[0].find('time')['datetime']
-                price_str = cells[1].text.strip().replace(',', '')
-                dates.append(pd.to_datetime(date_str))
-                prices.append(float(price_str))
-
-        column_name = f'{index_name} 선물가격(USD)'
-        df = pd.DataFrame({'조사일자': dates, column_name: prices})
+        df = data[['Close']].copy()
+        df.reset_index(inplace=True)
+        df.rename(columns={'Date': '조사일자', 'Close': f'{name} 선물가격(USD)'}, inplace=True)
         return df
-
-    except requests.exceptions.RequestException as e:
-        st.error(f"웹사이트({index_name})에 접속하는 중 오류 발생: {e}")
-        return None
     except Exception as e:
-        st.error(f"데이터({index_name})를 파싱하는 중 오류 발생: {e}")
+        st.error(f"Yahoo Finance ('{name}') 데이터를 가져오는 중 오류 발생: {e}")
         return None
 
-# --- Real-time Data Fetching Functions ---
 @st.cache_data(ttl=3600)
 def fetch_google_trends(keyword, start_date, end_date):
     """Google Trends에서 지정된 기간의 검색량 데이터를 가져옵니다."""
@@ -102,9 +82,9 @@ def fetch_naver_datalab(client_id, client_secret, keyword, start_date, end_date)
         return None
 
 # --- Constants ---
-COFFEE_INDICES = {
-    "런던 커피": "https://kr.investing.com/commodities/london-coffee-historical-data",
-    "미국 커피 C": "https://kr.investing.com/commodities/us-coffee-c-historical-data"
+COFFEE_TICKERS_YFINANCE = {
+    "미국 커피 C": "KC=F",
+    "런던 로부스타": "RC=F"
 }
 
 # --- Streamlit App ---
@@ -129,11 +109,9 @@ if uploaded_file:
             start_date = raw_trade_df['Date'].min()
             end_date = raw_trade_df['Date'].max()
             
-            # --- [수정] 업로드된 파일의 Category로 동적, 다중 선택 메뉴 생성 ---
             category_options = sorted(raw_trade_df['Category'].unique())
             selected_categories = st.sidebar.multiselect("2. 분석할 품목 카테고리 선택", category_options, default=category_options[0] if category_options else None)
             
-            # --- [추가] 검색어 직접 입력 기능 ---
             keyword_input = st.sidebar.text_input("3. 검색어 입력 (쉼표로 구분)", ", ".join(selected_categories) if selected_categories else "")
             search_keywords = [k.strip() for k in keyword_input.split(',') if k.strip()]
 
@@ -151,22 +129,26 @@ else:
 raw_wholesale_df = None
 st.sidebar.subheader("🔗 외부 가격 데이터")
 
-# --- [수정] 선택된 카테고리 이름에 '커피'가 포함되어 있는지 확인 ---
 is_coffee_selected = any('커피' in str(cat) for cat in selected_categories)
 
 if is_coffee_selected:
-    st.sidebar.info("커피 관련 품목이 선택되었습니다.\nInvesting.com에서 선물가격을 가져옵니다.")
-    for name, url in COFFEE_INDICES.items():
-        if st.sidebar.button(f"{name} 선물가격 가져오기"):
-            with st.spinner(f"Investing.com에서 {name} 데이터를 스크래핑 중..."):
-                data = fetch_investing_data(name, url)
+    st.sidebar.info("커피 관련 품목이 선택되었습니다.\nYahoo Finance에서 선물가격을 가져옵니다.")
+    if st.sidebar.button("선물가격 데이터 가져오기 (Yahoo Finance)"):
+        all_futures_data = []
+        for name, ticker in COFFEE_TICKERS_YFINANCE.items():
+             with st.spinner(f"{name}({ticker}) 데이터를 가져오는 중..."):
+                data = fetch_yfinance_data(ticker, name, start_date, end_date)
                 if data is not None:
-                    st.session_state[f'{name}_data'] = data
-                    st.sidebar.success(f"{name} 데이터 로드 성공!")
-    
-    loaded_futures_dfs = [st.session_state[f'{name}_data'] for name in COFFEE_INDICES if f'{name}_data' in st.session_state]
-    if loaded_futures_dfs:
-        raw_wholesale_df = reduce(lambda left, right: pd.merge(left, right, on='조사일자', how='outer'), loaded_futures_dfs)
+                    all_futures_data.append(data)
+        
+        if all_futures_data:
+            st.session_state['futures_data'] = reduce(lambda left, right: pd.merge(left, right, on='조사일자', how='outer'), all_futures_data)
+            st.sidebar.success("선물가격 데이터 로드 성공!")
+        else:
+            st.sidebar.error("선물가격 데이터를 가져오지 못했습니다.")
+
+    if 'futures_data' in st.session_state:
+        raw_wholesale_df = st.session_state['futures_data']
         raw_wholesale_df.sort_values('조사일자', inplace=True)
 else:
     wholesale_data_file = st.sidebar.file_uploader("도매가격 데이터 업로드 (KAMIS 등)", type=['csv', 'xlsx'])
@@ -222,7 +204,6 @@ with tab2:
     if not selected_categories:
         st.warning("분석할 카테고리를 사이드바에서 하나 이상 선택해주세요.")
     else:
-        # --- [수정] 선택된 카테고리로 데이터 필터링 ---
         st.subheader("2-1. 분석 대상 품목 필터링")
         filtered_trade_df = raw_trade_df[raw_trade_df['Category'].isin(selected_categories)].copy()
         st.write(f"선택된 카테고리: **{', '.join(selected_categories)}**")
@@ -264,7 +245,7 @@ with tab3:
         if 'search_weekly' in locals() and not search_weekly.empty: dfs_to_concat.append(search_weekly)
         
         final_df = reduce(lambda left, right: pd.merge(left, right, left_index=True, right_index=True, how='outer'), dfs_to_concat)
-        final_df = final_df.dropna(thresh=2).fillna(method='ffill') # Forward fill for better visualization
+        final_df = final_df.dropna(thresh=2).fillna(method='ffill')
         
         st.dataframe(final_df)
         st.subheader("최종 데이터 시각화")
