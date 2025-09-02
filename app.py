@@ -2,716 +2,251 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import statsmodels.api as sm
-import io
-from datetime import datetime, timedelta
-from bs4 import BeautifulSoup
-import re
+import requests
+from datetime import datetime
 
-# 구글 시트 API 연동을 위한 라이브러리
-import gspread
-from google.oauth2 import service_account
-
-# 설정: 페이지 제목 및 레이아웃
-st.set_page_config(
-    page_title="Data-Driven_Direction",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# 세션 상태 초기화
-if 'df_imports' not in st.session_state:
-    st.session_state.df_imports = pd.DataFrame()
-if 'df_naver' not in st.session_state:
-    st.session_state.df_naver = pd.DataFrame()
-if 'df_tds' not in st.session_state:
-    st.session_state.df_tds = pd.DataFrame()
-if 'df_combined' not in st.session_state:
-    st.session_state.df_combined = pd.DataFrame()
-if 'selected_hscodes' not in st.session_state:
-    st.session_state.selected_hscodes = []
-if 'top_countries' not in st.session_state:
-    st.session_state.top_countries = []
-
-st.title("🧭 Compass : Data-Driven Direction")
-
-st.markdown("""
-<style>
-.stTabs [data-baseweb="tab-list"] button [data-testid="stMarkdownContainer"] p {
-    font-size: 1.2rem;
-    font-weight: bold;
+# --- KAMIS API Codes ---
+# 사용자가 선택할 수 있도록 품목 코드 목록을 미리 정의합니다.
+KAMIS_CATEGORIES = {
+    '가공식품': '300',
+    '채소류': '200',
+    '과일류': '400',
+    '식량작물': '100',
 }
-</style>
-""", unsafe_allow_html=True)
+KAMIS_ITEMS = {
+    '300': {'커피': '314', '라면': '315', '설탕': '324', '식용유': '316'},
+    '200': {'배추': '211', '양파': '223', '마늘': '225', '고추': '243'},
+    '400': {'사과': '411', '배': '412', '바나나': '418'},
+    '100': {'쌀': '111', '찹쌀': '112', '콩': '131'},
+}
 
-# -----------------
-# 구글 시트 연동 함수
-# -----------------
-@st.cache_resource(ttl=3600)
-def get_google_sheet_client():
-    """
-    Streamlit secrets를 사용하여 구글 시트 클라이언트를 인증하고 가져오는 함수.
-    실제 Streamlit Cloud 환경에서 secrets에 서비스 계정 JSON이 설정되어 있어야 함.
-    """
-    try:
-        credentials = service_account.Credentials.from_service_account_info(
-            st.secrets["gcp_service_account"],
-            scopes=["https://www.googleapis.com/auth/spreadsheets"]
-        )
-        gc = gspread.authorize(credentials)
-        return gc
-    except Exception as e:
-        st.error(f"구글 시트 인증 오류: {e}")
+# --- API Data Fetching Function ---
+
+def fetch_kamis_data(api_key, cert_id, start_date, end_date, category_code, item_code):
+    """KAMIS API를 호출하여 지정된 기간의 도매가 데이터를 가져옵니다."""
+    if not api_key or not cert_id:
+        st.sidebar.warning("KAMIS API 키와 ID를 입력해주세요.")
         return None
-        
-def normalize_hscode(hscode_series):
-    """
-    HS코드를 10자리 문자열로 정규화합니다.
-    """
-    return hscode_series.astype(str).str.strip().str.zfill(10)
 
-def read_google_sheet(sheet_name):
-    """
-    지정된 구글 시트의 워크시트에서 데이터를 읽어 DataFrame으로 반환합니다.
-    """
-    gc = get_google_sheet_client()
-    if gc:
-        try:
-            sh = gc.open_by_url("https://docs.google.com/spreadsheets/d/12YdcKX3nvaNfFWYkJApRnoKAQnjCeR09AGRJ6rBiOuM/edit?gid=0#gid=0")
-            worksheet = sh.worksheet(sheet_name)
-            
-            all_data = worksheet.get_all_values()
-            if not all_data:
-                return pd.DataFrame()
-            
-            headers = all_data[0]
-            seen = {}
-            for i, header in enumerate(headers):
-                if not header:
-                    headers[i] = f'Unnamed_{i}'
-                elif header in seen:
-                    headers[i] = f'{header}_{seen[header]}'
-                    seen[header] += 1
-                else:
-                    seen[header] = 1
+    start_str = start_date.strftime('%Y-%m-%d')
+    end_str = end_date.strftime('%Y-%m-%d')
 
-            data = all_data[1:]
-            df = pd.DataFrame(data, columns=headers)
-            
-            # 데이터 정제 및 타입 변환
-            if sheet_name == '네이버 데이터랩':
-                if '커피' in df.columns:
-                    df.rename(columns={'커피': '검색량'}, inplace=True)
-                df['검색량'] = pd.to_numeric(df['검색량'], errors='coerce')
-                df['날짜'] = pd.to_datetime(df['날짜'], errors='coerce')
-            elif sheet_name == 'TDS':
-                if 'Detailed HS-CODE' in df.columns:
-                    df.rename(columns={'Detailed HS-CODE': 'HS코드'}, inplace=True)
-                df['Volume'] = pd.to_numeric(df['Volume'], errors='coerce')
-                df['Value'] = pd.to_numeric(df['Value'], errors='coerce')
-                if 'HS코드' in df.columns:
-                    df['HS코드'] = normalize_hscode(df['HS코드'])
-                df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-                # TDS에만 있는 컬럼 확인 및 추가
-                if 'Raw Importer Name' not in df.columns: df['Raw Importer Name'] = ''
-                if 'Exporter' not in df.columns: df['Exporter'] = ''
-            elif sheet_name == '관세청':
-                df['수입 중량'] = pd.to_numeric(df['수입 중량'], errors='coerce')
-                df['수입 금액'] = pd.to_numeric(df['수입 금액'], errors='coerce')
-                if 'HS코드' in df.columns:
-                    df['HS코드'] = normalize_hscode(df['HS코드'])
-                if '기간' in df.columns:
-                    df['기간'] = pd.to_datetime(df['기간'], errors='coerce')
-                    df.rename(columns={'기간': 'Date'}, inplace=True)
+    url = "http://www.kamis.or.kr/service/price/xml.do"
+    params = {
+        'p_product_cls_code': '02',
+        'p_startday': start_str,
+        'p_endday': end_str,
+        'p_itemcategorycode': category_code,
+        'p_itemcode': item_code,
+        'p_kindcode': '00',
+        'p_productrankcode': '04',
+        'p_countrycode': '1101',
+        'p_cert_key': api_key,
+        'p_cert_id': cert_id,
+        'p_returntype': 'json'
+    }
 
-            return df
-        except Exception as e:
-            st.error(f"'{sheet_name}' 워크시트 읽기 오류: {e}")
-            return pd.DataFrame()
-    return pd.DataFrame()
+    try:
+        with st.spinner(f"KAMIS API에서 '{list(KAMIS_ITEMS[category_code].keys())[list(KAMIS_ITEMS[category_code].values()).index(item_code)]}' 데이터를 가져오는 중..."):
+            response = requests.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
 
-# -----------------
-# 파일 업로드 및 데이터 처리
-# -----------------
-st.sidebar.header("데이터 업로드 및 가져오기")
-uploaded_imports = st.sidebar.file_uploader("1. 관세청 데이터 (.csv)", type="csv", key="imports")
-uploaded_naver = st.sidebar.file_uploader("2. 네이버 데이터랩 (.csv)", type="csv", key="naver")
-uploaded_tds = st.sidebar.file_uploader("3. 트릿지 데이터 (.csv)", type="csv", key="tds")
+            if 'data' in data and 'item' in data['data']:
+                items = data['data']['item']
+                if not items: # 데이터가 없는 경우
+                    st.sidebar.warning("선택하신 기간/품목에 대한 KAMIS 데이터가 없습니다.")
+                    return pd.DataFrame() # 빈 데이터프레임 반환
+                
+                df = pd.DataFrame(items)
+                df = df[['regday', 'price']]
+                df.columns = ['조사일자', '도매가격(원)']
+                
+                df['조사일자'] = pd.to_datetime(df['조사일자'], format='%Y/%m/%d')
+                df['도매가격(원)'] = pd.to_numeric(df['price'].str.replace(',', ''), errors='coerce')
+                
+                st.sidebar.success("KAMIS 데이터 로드 성공!")
+                return df
+            else:
+                error_msg = data.get('error_message', '데이터 없음')
+                st.sidebar.error(f"KAMIS API 오류: {error_msg}")
+                return None
+    except requests.exceptions.RequestException as e:
+        st.sidebar.error(f"API 호출 중 네트워크 오류: {e}")
+        return None
+    except Exception as e:
+        st.sidebar.error(f"데이터 처리 중 오류: {e}")
+        return None
 
-def load_data():
-    if uploaded_imports:
-        try:
-            df = pd.read_csv(uploaded_imports)
-            if '기간' not in df.columns:
-                if '년' in df.columns and '월' in df.columns:
-                    df['기간'] = df['년'].astype(str) + '.' + df['월'].astype(str).str.zfill(2)
-            df['기간'] = pd.to_datetime(df['기간'], errors='coerce')
-            df.rename(columns={'기간': 'Date'}, inplace=True)
-            df['수입 중량'] = pd.to_numeric(df['수입 중량'], errors='coerce')
-            df['수입 금액'] = pd.to_numeric(df['수입 금액'], errors='coerce')
-            if 'HS코드' in df.columns:
-                df['HS코드'] = normalize_hscode(df['HS코드'])
+# --- Mock Data Generation Function ---
+def create_mock_search_data():
+    """Naver/Google 검색량 데이터의 가상 버전 생성"""
+    dates = pd.to_datetime(pd.date_range(start="2023-01-01", end="2024-12-31", freq='D'))
+    n = len(dates)
+    data = {
+        '날짜': dates,
+        '키워드': '인스턴트 커피',
+        '검색량': [70 + np.sin(i/28)*25 + np.random.randint(-5, 5) for i in range(n)]
+    }
+    return pd.DataFrame(data)
 
-            st.session_state.df_imports = pd.concat([st.session_state.df_imports, df], ignore_index=True)
-            st.sidebar.success("관세청 데이터 업로드 완료!")
-        except Exception as e:
-            st.sidebar.error(f"관세청 CSV 파일 형식이 올바르지 않습니다: {e}")
+# --- Streamlit App ---
 
-    if uploaded_naver:
-        try:
-            df = pd.read_csv(uploaded_naver, skiprows=6)
-            
-            if '커피' in df.columns:
-                df.rename(columns={'커피': '검색량'}, inplace=True)
-            
-            df['검색량'] = pd.to_numeric(df['검색량'], errors='coerce')
-            df['날짜'] = pd.to_datetime(df['날짜'], errors='coerce')
-            
-            st.session_state.df_naver = pd.concat([st.session_state.df_naver, df], ignore_index=True)
-            st.sidebar.success("네이버 데이터랩 업로드 완료!")
-        except Exception as e:
-            st.sidebar.error(f"네이버 데이터랩 CSV 파일 형식이 올바르지 않습니다: {e}")
+st.set_page_config(layout="wide")
+st.title("📊 데이터 탐색 및 통합 대시보드")
+st.info("각기 다른 소스의 원본 데이터를 확인하고, 이들이 어떻게 하나의 분석용 데이터셋으로 통합되는지 단계별로 살펴봅니다.")
 
-    if uploaded_tds:
-        try:
-            df_raw = uploaded_tds.getvalue().decode("utf-8")
-            df = pd.read_csv(io.StringIO(df_raw), header=None)
-            
-            headers = df.iloc[0].tolist()
-            seen = {}
-            new_headers = []
-            for i, header in enumerate(headers):
-                if not isinstance(header, str) or not header:
-                    new_header = f'Unnamed_{i}'
-                elif header in seen:
-                    seen[header] += 1
-                    new_header = f'{header}_{seen[header]}'
-                else:
-                    seen[header] = 1
-                    new_header = header
-                new_headers.append(new_header)
-            
-            df.columns = new_headers
-            df = df.iloc[1:].reset_index(drop=True)
-            
-            if 'Detailed HS-CODE' in df.columns:
-                df.rename(columns={'Detailed HS-CODE': 'HS코드'}, inplace=True)
-            if 'Volume' in df.columns:
-                df['Volume'] = pd.to_numeric(df['Volume'], errors='coerce')
-            if 'Value' in df.columns:
-                df['Value'] = pd.to_numeric(df['Value'], errors='coerce')
-            if 'HS코드' in df.columns:
-                df['HS코드'] = normalize_hscode(df['HS코드'])
-            if 'Date' in df.columns:
-                df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-            
-            # TDS에만 있는 컬럼 확인 및 추가
-            if 'Raw Importer Name' not in df.columns: df['Raw Importer Name'] = ''
-            if 'Exporter' not in df.columns: df['Exporter'] = ''
+# --- Sidebar for file upload and controls ---
+st.sidebar.header("⚙️ 분석 설정")
+uploaded_file = st.sidebar.file_uploader("수출입 데이터 파일 업로드 (CSV or Excel)", type=['csv', 'xlsx'])
 
-            st.session_state.df_tds = pd.concat([st.session_state.df_tds, df], ignore_index=True)
-            st.sidebar.success("TDS 업로드 완료!")
-        except Exception as e:
-            st.sidebar.error(f"TDS CSV 파일 형식이 올바르지 않습니다: {e}")
+st.sidebar.subheader("🔗 외부 데이터 연동 (API)")
+kamis_api_key = st.sidebar.text_input("KAMIS API 인증키", type="password", help="kamis.or.kr에서 발급받은 인증키를 입력하세요.")
+kamis_cert_id = st.sidebar.text_input("KAMIS API 인증 ID", type="password", help="API 신청 시 등록한 ID를 입력하세요.")
 
-if st.sidebar.button("데이터 업로드 및 가져오기"):
-    load_data()
-    st.session_state.df_imports = read_google_sheet("관세청")
-    st.session_state.df_naver = read_google_sheet("네이버 데이터랩")
-    st.session_state.df_tds = read_google_sheet("TDS")
-    if not st.session_state.df_imports.empty: st.sidebar.success("관세청 데이터 불러오기 완료!")
-    if not st.session_state.df_naver.empty: st.sidebar.success("네이버 데이터랩 데이터 불러오기 완료!")
-    if not st.session_state.df_tds.empty: st.sidebar.success("TDS 데이터 불러오기 완료!")
+st.sidebar.subheader("KAMIS 품목 선택")
+selected_category_name = st.sidebar.selectbox("품목 분류", list(KAMIS_CATEGORIES.keys()))
+selected_category_code = KAMIS_CATEGORIES[selected_category_name]
 
-if st.session_state.df_imports.empty or st.session_state.df_tds.empty or st.session_state.df_naver.empty:
-    st.warning("분석을 시작하려면 먼저 사이드바에서 **데이터 업로드 및 가져오기** 버튼을 눌러주세요.")
-else:
-    df_imports_renamed = st.session_state.df_imports.rename(columns={'국가': 'Origin Country', '수입 중량': 'Volume', '수입 금액': 'Value'})
-    
-    # Ensure TDS-specific columns are present in df_imports_renamed
-    if 'Raw Importer Name' not in df_imports_renamed.columns: df_imports_renamed['Raw Importer Name'] = ''
-    if 'Exporter' not in df_imports_renamed.columns: df_imports_renamed['Exporter'] = ''
+available_items = KAMIS_ITEMS[selected_category_code]
+selected_item_name = st.sidebar.selectbox("세부 품목", list(available_items.keys()))
+selected_item_code = available_items[selected_item_name]
 
-    df_combined_imports_tds = pd.concat([
-        df_imports_renamed,
-        st.session_state.df_tds.rename(columns={'Product Description': '품목명'})
-    ], ignore_index=True)
-    
-    df_combined_imports_tds = df_combined_imports_tds[
-        (df_combined_imports_tds['Volume'] > 0) &
-        (df_combined_imports_tds['Value'] > 0) &
-        (df_combined_imports_tds['HS코드'].notna()) &
-        (df_combined_imports_tds['Origin Country'].notna())
-    ].copy()
+st.sidebar.subheader("분석 대표 품목")
+selected_product_category = st.sidebar.selectbox("분석할 대표 품목 선택", ['인스턴트 커피', '원두 커피', '캡슐 커피'])
 
-    all_hscodes = df_combined_imports_tds[['HS코드', '품목명']].dropna().drop_duplicates(subset='HS코드').sort_values(by='HS코드').reset_index(drop=True)
-    all_hscodes['display_name'] = all_hscodes['HS코드'].astype(str) + ' - ' + all_hscodes['품목명']
-    hscode_options = all_hscodes['display_name'].tolist()
 
-    st.session_state.selected_hscodes = st.sidebar.multiselect(
-        "분석할 HS코드를 선택하세요",
-        options=hscode_options,
-        default=hscode_options[:2] if len(hscode_options) > 1 else hscode_options
-    )
+# --- Keyword Mapping Rule ---
+KEYWORD_MAPPING = {
+    '맥심 모카골드': '인스턴트 커피',
+    '스타벅스 파이크플레이스': '원두 커피',
+    '네스카페 돌체구스토': '캡슐 커피',
+    '커피': '인스턴트 커피', # KAMIS 데이터용
+    '인스턴트 커피': '인스턴트 커피' # 검색 데이터용
+}
 
-    selected_codes = [s.split(' - ')[0] for s in st.session_state.selected_hscodes]
+# --- Main App Logic ---
 
-    if not selected_codes:
-        st.warning("분석을 위해 최소 하나 이상의 HS코드를 선택해야 합니다.")
-    else:
-        df_filtered = df_combined_imports_tds[
-            df_combined_imports_tds['HS코드'].astype(str).isin(selected_codes)
-        ].copy()
-
-        # 데이터 유효성 검사 및 정제 강화
-        df_filtered['Date'] = pd.to_datetime(df_filtered['Date'], errors='coerce')
-        df_filtered.dropna(subset=['Date', 'Volume', 'Value', 'Origin Country'], inplace=True)
-        
-        # 필터링된 데이터가 비어있을 경우 예외 처리
-        if df_filtered.empty:
-            st.warning("선택한 HS코드에 대한 유효한 데이터가 존재하지 않아 대시보드를 표시할 수 없습니다.")
+# 1. 데이터 로드
+raw_trade_df = None
+if uploaded_file is not None:
+    try:
+        if uploaded_file.name.endswith('.csv'):
+            raw_trade_df = pd.read_csv(uploaded_file)
         else:
-            min_date_ts = pd.to_datetime(df_filtered['Date'].min())
-            max_date_ts = pd.to_datetime(df_filtered['Date'].max())
-            start_date, end_date = st.sidebar.slider(
-                "분석 기간을 선택하세요",
-                min_value=min_date_ts.to_pydatetime(),
-                max_value=max_date_ts.to_pydatetime(),
-                value=(min_date_ts.to_pydatetime(), max_date_ts.to_pydatetime()),
-                format="YYYY-MM-DD"
-            )
+            raw_trade_df = pd.read_excel(uploaded_file)
+        
+        if 'Date' in raw_trade_df.columns:
+            raw_trade_df['Date'] = pd.to_datetime(raw_trade_df['Date'])
+        else:
+            st.error("업로드된 파일에 'Date' 컬럼이 없습니다. 날짜 정보가 담긴 컬럼의 이름을 'Date'로 변경해주세요.")
+            st.stop()
             
-            with st.spinner('데이터를 통합하는 중입니다...'):
-                try:
-                    df_filtered = df_filtered[
-                        (df_filtered['Date'] >= pd.Timestamp(start_date)) & 
-                        (df_filtered['Date'] <= pd.Timestamp(end_date))
-                    ]
-                    
-                    df_combined_monthly = df_filtered.groupby(
-                        pd.Grouper(key='Date', freq='M')
-                    ).agg({
-                        'Volume': 'sum',
-                        'Value': 'sum'
-                    }).reset_index().rename(columns={'Volume': '수입 중량', 'Value': '수입 금액'})
-                    
-                    df_naver_monthly = st.session_state.df_naver.copy()
-                    df_naver_monthly['날짜'] = pd.to_datetime(df_naver_monthly['날짜'], errors='coerce')
-                    df_naver_monthly.dropna(subset=['날짜'], inplace=True)
-                    df_naver_monthly = df_naver_monthly[
-                        (df_naver_monthly['날짜'] >= pd.Timestamp(start_date)) & 
-                        (df_naver_monthly['날짜'] <= pd.Timestamp(end_date))
-                    ]
-                    df_naver_monthly = df_naver_monthly.groupby(
-                        pd.Grouper(key='날짜', freq='M')
-                    ).agg({'검색량': 'mean'}).reset_index()
+    except Exception as e:
+        st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
+        st.stop()
+else:
+    st.info("👈 사이드바에서 분석할 수출입 데이터 파일을 업로드해주세요.")
+    st.stop()
 
-                    df_combined = pd.merge(
-                        df_combined_monthly,
-                        df_naver_monthly,
-                        left_on=df_combined_monthly['Date'].dt.strftime('%Y-%m'),
-                        right_on=df_naver_monthly['날짜'].dt.strftime('%Y-%m'),
-                        how='outer'
-                    )
-                    
-                    df_combined.rename(columns={'key_0': '기간'}, inplace=True)
-                    df_combined.drop(['Date', '날짜'], axis=1, errors='ignore', inplace=True)
-                    df_combined['수입 중량'].fillna(0, inplace=True)
-                    df_combined['수입 금액'].fillna(0, inplace=True)
-                    df_combined['검색량'].fillna(0, inplace=True)
-                    
-                    if '기간_y' in df_combined.columns:
-                        df_combined.drop('기간_y', axis=1, inplace=True)
+# 외부 데이터 로드
+min_date = raw_trade_df['Date'].min().date()
+max_date = raw_trade_df['Date'].max().date()
+raw_kamis_df = fetch_kamis_data(kamis_api_key, kamis_cert_id, min_date, max_date, selected_category_code, selected_item_code)
+raw_search_df = create_mock_search_data()
 
-                    st.session_state.df_combined = df_combined
-                    st.success("데이터 통합 완료!")
-                except Exception as e:
-                    st.error(f"데이터 통합 중 오류가 발생했습니다. 업로드한 파일 형식을 확인해주세요: {e}")
 
-            tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 대시보드", "🔮 예측 모델", "📈 상관관계 분석", "🗺️ 공급망 분석", "🗃️ 원본 데이터"])
+# Tabs
+tab1, tab2, tab3 = st.tabs(["1️⃣ 원본 데이터 확인", "2️⃣ 데이터 표준화 (Preprocessing)", "3️⃣ 최종 통합 데이터"])
 
-            with tab1:
-                st.header("커피 원두 시장 동향 분석")
-                total_filtered_rows = df_filtered.shape[0]
-                st.info(f"선택한 HS코드에 대한 총 데이터 행: {total_filtered_rows}개")
+with tab1:
+    st.header("1. 각기 다른 데이터 소스의 원본 형태")
+    st.write("API, 크롤링, 엑셀 파일 등에서 가져온 데이터는 아래처럼 서로 다른 형식과 구조를 가집니다.")
+    
+    st.subheader("A. 수출입 데이터 (사용자 제공)")
+    st.dataframe(raw_trade_df.head())
 
-                if not st.session_state.df_combined.empty and not st.session_state.df_combined['수입 중량'].sum() == 0:
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        total_volume = st.session_state.df_combined['수입 중량'].sum() / 1000000
-                        st.metric("총 수입량 (백만 kg)", f"{total_volume:,.2f}")
-                    with col2:
-                        total_value = st.session_state.df_combined['수입 금액'].sum() / 1000000
-                        st.metric("총 수입금액 (백만 $)", f"{total_value:,.2f}")
-                    with col3:
-                        valid_data = df_filtered[df_filtered['Volume'] > 0]
-                        avg_unit_price = (valid_data['Value'] / valid_data['Volume']).mean()
-                        st.metric("평균 단가 ($/kg)", f"{avg_unit_price:,.2f}" if not pd.isna(avg_unit_price) else "N/A")
+    st.subheader("B. KAMIS 도소매가 데이터")
+    if raw_kamis_df is not None and not raw_kamis_df.empty:
+        st.dataframe(raw_kamis_df.head())
+    else:
+        st.warning("KAMIS API 키와 ID를 사이드바에 입력하면 실제 데이터를 가져옵니다. 현재는 데이터가 없습니다.")
 
-                    st.subheader("기간별 수입량 및 검색량 추이")
-                    
-                    fig1 = make_subplots(specs=[[{"secondary_y": True}]])
+    st.subheader("C. 검색량 데이터 (Naver/Google)")
+    st.dataframe(raw_search_df.head())
 
-                    fig1.add_trace(
-                        go.Scatter(
-                            x=st.session_state.df_combined['기간'], 
-                            y=st.session_state.df_combined['수입 중량'], 
-                            name='수입 중량'
-                        ),
-                        secondary_y=False,
-                    )
+with tab2:
+    st.header("2. 데이터 표준화: 같은 기준으로 데이터 맞춰주기")
+    st.write("분석을 위해 모든 데이터를 '주(Week)' 단위로 맞추고, 품목 이름을 통일하는 등의 전처리 과정을 거칩니다.")
 
-                    fig1.add_trace(
-                        go.Scatter(
-                            x=st.session_state.df_combined['기간'], 
-                            y=st.session_state.df_combined['검색량'], 
-                            name='검색량'
-                        ),
-                        secondary_y=True,
-                    )
+    st.subheader("2-1. 품목 이름 통합 (Keyword Mapping)")
+    st.write(f"**'{selected_product_category}'** 와 관련된 여러 이름들을 하나의 대표 이름으로 통합합니다.")
+    
+    filtered_trade_df = raw_trade_df.copy()
+    if 'Reported Product Name' in filtered_trade_df.columns:
+        filtered_trade_df['대표 품목'] = filtered_trade_df['Reported Product Name'].map(KEYWORD_MAPPING)
+        filtered_trade_df = filtered_trade_df[filtered_trade_df['대표 품목'] == selected_product_category]
+        st.write("▼ 수출입 데이터에서 'Reported Product Name'이 '대표 품목'으로 통합된 결과")
+        st.dataframe(filtered_trade_df[['Date', 'Reported Product Name', '대표 품목', 'Value', 'Volume']].head())
+    else:
+        st.warning("'Reported Product Name' 컬럼이 없어 품목 이름 통합을 건너뜁니다.")
 
-                    fig1.update_layout(
-                        title_text="월별 수입량과 검색량 추이",
-                        legend=dict(
-                            orientation="h",
-                            yanchor="bottom",
-                            y=1.02,
-                            xanchor="right",
-                            x=1
-                        )
-                    )
+    
+    st.subheader("2-2. 주(Week) 단위 데이터로 집계")
+    st.write("모든 데이터를 '매주 월요일' 기준으로 합산하거나 평균을 내어 주별 데이터로 변환합니다.")
 
-                    fig1.update_yaxes(title_text="<b>수입량 (kg)</b>", secondary_y=False)
-                    fig1.update_yaxes(title_text="<b>검색량</b>", secondary_y=True)
+    filtered_trade_df = filtered_trade_df.set_index('Date')
+    trade_weekly = filtered_trade_df.resample('W-Mon').agg({'Value': 'sum', 'Volume': 'sum'})
+    trade_weekly['Unit Price'] = trade_weekly['Value'] / trade_weekly['Volume']
+    trade_weekly.columns = ['수입액(USD)', '수입량(KG)', '수입단가(USD/KG)']
 
-                    st.plotly_chart(fig1, use_container_width=True)
+    kamis_weekly = pd.DataFrame()
+    if raw_kamis_df is not None and not raw_kamis_df.empty:
+        kamis_df_processed = raw_kamis_df.set_index('조사일자')
+        kamis_weekly = kamis_df_processed.resample('W-Mon').agg({'도매가격(원)': 'mean'})
+        kamis_weekly['도매가격(USD)'] = kamis_weekly['도매가격(원)'] / 1350 # 환율 가정
 
-                    st.subheader("원산지별 가격 경쟁력 및 공급 안정성 분석")
-                    
-                    top_10_countries = df_filtered.groupby('Origin Country')['Volume'].sum().nlargest(10).index.tolist()
-                    df_country_analysis = df_filtered[df_filtered['Origin Country'].isin(top_10_countries)].copy()
-                    df_country_analysis['단가'] = df_country_analysis['Value'] / df_country_analysis['Volume']
-                    df_country_analysis.dropna(subset=['단가', 'Origin Country'], inplace=True)
-                    
-                    if 'Exporter' in df_filtered.columns and 'Raw Importer Name' in df_filtered.columns:
-                        df_filtered['Exporter'].fillna('', inplace=True)
-                        df_filtered['Raw Importer Name'].fillna('', inplace=True)
+    search_df_processed = raw_search_df.set_index('날짜')
+    search_weekly = search_df_processed.resample('W-Mon').agg({'검색량': 'mean'})
+    
+    st.write("▼ 일별(Daily) 데이터가 주별(Weekly) 데이터로 집계된 결과")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.write("**Before (일별 수입량)**")
+        st.line_chart(filtered_trade_df['Volume'])
+    with col2:
+        st.write("**After (주별 수입량)**")
+        st.line_chart(trade_weekly['수입량(KG)'])
 
-                    if not df_country_analysis.empty:
-                        col_price, col_stability = st.columns(2)
 
-                        with col_price:
-                            price_competitiveness = df_country_analysis.groupby('Origin Country')['단가'].mean().reset_index()
-                            price_competitiveness = price_competitiveness.sort_values(by='단가', ascending=True)
-                            fig_price = go.Figure(px.bar(
-                                price_competitiveness,
-                                x='Origin Country',
-                                y='단가',
-                                title='평균 단가($/kg) - 가격 경쟁력 (낮을수록 유리)',
-                                labels={'단가': '평균 단가 ($/kg)', 'Origin Country': '원산지'}
-                            ))
-                            fig_price.update_traces(hovertemplate='<b>%{x}</b><br>평균 단가: %{y:,.2f} $/kg<extra></extra>')
-                            fig_price.update_layout(xaxis={'categoryorder':'total ascending'})
-                            st.plotly_chart(fig_price, use_container_width=True)
+with tab3:
+    st.header("3. 최종 통합 데이터셋")
+    st.write("모든 표준화 과정을 거친 데이터들을 '날짜'를 기준으로 합쳐, 분석에 사용할 최종 데이터셋을 완성합니다.")
 
-                        with col_stability:
-                            monthly_volume = df_country_analysis.groupby([pd.Grouper(key='Date', freq='M'), 'Origin Country'])['Volume'].sum().reset_index()
-                            stability = monthly_volume.groupby('Origin Country')['Volume'].std().reset_index().rename(columns={'Volume': '변동성'})
-                            stability = stability.sort_values(by='변동성', ascending=True)
-                            fig_stability = go.Figure(px.bar(
-                                stability,
-                                x='Origin Country',
-                                y='변동성',
-                                title='공급량 변동성 (낮을수록 안정적)',
-                                labels={'변동성': '표준편차', 'Origin Country': '원산지'}
-                            ))
-                            fig_stability.update_traces(hovertemplate='<b>%{x}</b><br>공급량 변동성: %{y:,.2f}<extra></extra>')
-                            fig_stability.update_layout(xaxis={'categoryorder':'total ascending'})
-                            st.plotly_chart(fig_stability, use_container_width=True)
-                    else:
-                        st.warning("선택한 HS코드에 대한 원산지별 데이터가 충분하지 않아 분석을 표시할 수 없습니다.")
-                    
-                    st.subheader("국가별 수입량 및 금액")
-                    
-                    df_country_filtered = df_filtered[df_filtered['Origin Country'].isin(top_10_countries)]
-                    
-                    df_country = df_country_filtered.groupby('Origin Country').agg({
-                        'Volume': 'sum',
-                        'Value': 'sum'
-                    }).reset_index().rename(columns={'Origin Country': '국가', 'Volume': '수입 중량', 'Value': '수입 금액'})
+    dfs_to_concat = [trade_weekly, search_weekly]
+    if not kamis_weekly.empty:
+        dfs_to_concat.append(kamis_weekly)
 
-                    df_country = df_country.sort_values(by='수입 중량', ascending=False)
-                    
-                    if not df_country.empty:
-                        col1_bar, col2_bar = st.columns(2)
-                        with col1_bar:
-                            fig_country_vol = go.Figure(px.bar(
-                                df_country.head(10), 
-                                x='국가', 
-                                y='수입 중량', 
-                                title='주요 수입국 (수입량 기준)',
-                                labels={'수입 중량': '수입량 (kg)'}
-                            ))
-                            fig_country_vol.update_traces(hovertemplate='<b>%{x}</b><br>수입 중량: %{y:,.0f} kg<extra></extra>', text=None, texttemplate=None)
-                            st.plotly_chart(fig_country_vol, use_container_width=True)
-                        with col2_bar:
-                            fig_country_val = go.Figure(px.bar(
-                                df_country.sort_values(by='수입 금액', ascending=False).head(10), 
-                                x='국가', 
-                                y='수입 금액', 
-                                title='주요 수입국 (수입금액 기준)',
-                                labels={'수입 금액': '수입금액 ($)'}
-                            ))
-                            fig_country_val.update_traces(hovertemplate='<b>%{x}</b><br>수입 금액: %{y:,.0f} $<extra></extra>', text=None, texttemplate=None)
-                            st.plotly_chart(fig_country_val, use_container_chart=True)
-                    else:
-                        st.warning("선택한 HS코드에 대한 국가별 데이터가 없습니다.")
-                else:
-                    st.warning("선택한 HS코드에 대한 데이터가 존재하지 않아 대시보드를 표시할 수 없습니다.")
+    final_df = pd.concat(dfs_to_concat, axis=1)
+    
+    # NaN이 많은 초기 데이터 제거
+    final_df = final_df.dropna(thresh=2)
+    
+    final_columns = ['수입량(KG)', '수입단가(USD/KG)', '검색량']
+    if '도매가격(USD)' in final_df.columns:
+        final_columns.insert(2, '도매가격(USD)')
+    
+    # 존재하는 컬럼만 선택
+    final_df = final_df[[col for col in final_columns if col in final_df.columns]]
 
-            with tab2:
-                st.header("수요/가격 예측 모델 (간단한 회귀 모델)")
-                st.markdown("""
-                ---
-                ### **예측 로직 설명**
-                이 모델은 **단순 선형 회귀(Linear Regression)**를 사용합니다. 과거 **'네이버 검색량'** 데이터가 다음 달 **'수입 중량'**에 미치는 영향을 분석하여 미래의 수입량을 예측합니다. 즉, 소비자의 검색 관심도(수요)가 실제 수입(공급)으로 이어지는 경향을 파악하여 예측하는 방식입니다.
+    st.write("이 통합된 데이터가 `analysis_app.py`에서 상관관계를 분석하는 데 사용됩니다.")
+    st.dataframe(final_df)
 
-                **💡 전략 인사이트**: 검색량이 수입량으로 이어지는 경향이 있습니다. 검색량 추이를 지속적으로 모니터링하여 미리 물량을 확보하면 재고 및 공급망 관리에 유리합니다.
-                """)
-                
-                if not st.session_state.df_combined.empty and not st.session_state.df_combined['수입 중량'].sum() == 0:
-                    df_model = st.session_state.df_combined.copy()
-                    
-                    df_model['검색량_lag1'] = df_model['검색량'].shift(1)
-                    df_model.dropna(inplace=True)
+    st.subheader("최종 데이터 시각화")
+    st.write("통합된 각 데이터 항목의 시계열 추세를 한눈에 확인합니다.")
+    
+    fig = px.line(final_df, x=final_df.index, y=final_df.columns,
+                  labels={'value': '값', 'date': '날짜', 'variable': '데이터 종류'},
+                  title="최종 통합 데이터 시계열 추이")
+    st.plotly_chart(fig, use_container_width=True)
 
-                    if not df_model.empty:
-                        X = sm.add_constant(df_model['검색량_lag1'])
-                        y = df_model['수입 중량']
-                        
-                        model = sm.OLS(y, X).fit()
-                        
-                        predictions = model.get_prediction(X)
-                        df_model['예측 수입 중량'] = predictions.predicted_mean
-                        conf_int = predictions.conf_int(alpha=0.05)
-                        df_model['conf_int_lower'] = conf_int[:, 0]
-                        df_model['conf_int_upper'] = conf_int[:, 1]
-                        
-                        st.write("---")
-                        st.subheader("미래 수입량 예측")
-                        
-                        last_search_volume = df_model['검색량'].iloc[-1]
-                        predicted_volume = model.predict([1, last_search_volume])[0]
-                        
-                        st.success(f"다음 달 예상 수입량은 **{predicted_volume:,.0f} kg** 입니다.")
-                        st.info("💡 **전략 인사이트**: 검색량이 수입량으로 이어지는 경향이 있습니다. 검색량 추이를 지속적으로 모니터링하여 미리 물량을 확보하세요.")
-                
-                        st.subheader("예측 모델 결과 시각화")
-                        fig_pred = go.Figure()
-
-                        fig_pred.add_trace(go.Scatter(
-                            x=df_model['기간'],
-                            y=df_model['수입 중량'],
-                            mode='lines',
-                            name='실제 수입 중량'
-                        ))
-
-                        fig_pred.add_trace(go.Scatter(
-                            x=df_model['기간'],
-                            y=df_model['예측 수입 중량'],
-                            mode='lines',
-                            name='예측 수입 중량',
-                            line=dict(color='red', dash='dash')
-                        ))
-
-                        fig_pred.add_trace(go.Scatter(
-                            x=df_model['기간'],
-                            y=df_model['conf_int_upper'],
-                            mode='lines',
-                            line=dict(width=0),
-                            showlegend=False
-                        ))
-                        fig_pred.add_trace(go.Scatter(
-                            x=df_model['기간'],
-                            y=df_model['conf_int_lower'],
-                            mode='lines',
-                            line=dict(width=0),
-                            fill='tonexty',
-                            fillcolor='rgba(200, 200, 200, 0.2)',
-                            name='95% 신뢰구간'
-                        ))
-
-                        fig_pred.update_layout(
-                            title_text="실제 수입량 vs. 예측 수입량 (95% 신뢰구간)",
-                            xaxis_title="기간",
-                            yaxis_title="수입량 (kg)"
-                        )
-                        st.plotly_chart(fig_pred, use_container_width=True)
-                    else:
-                        st.warning("데이터가 너무 적어 예측 모델을 실행할 수 없습니다. 더 많은 데이터를 업로드해주세요.")
-                else:
-                    st.warning("선택한 HS코드에 대한 데이터가 존재하지 않아 예측 모델을 활성화할 수 없습니다.")
-
-            with tab3:
-                st.header("데이터 상관관계 분석")
-                if not st.session_state.df_combined.empty and not st.session_state.df_combined['수입 중량'].sum() == 0:
-                    corr_matrix = st.session_state.df_combined[['수입 중량', '수입 금액', '검색량']].corr()
-                    st.subheader("상관관계 행렬")
-                    st.dataframe(corr_matrix, use_container_width=True)
-
-                    st.markdown(
-                        """
-                        - **상관계수 1**: 완벽한 양의 상관관계 (한 변수 증가 시 다른 변수도 증가)
-                        - **상관계수 -1**: 완벽한 음의 상관관계 (한 변수 증가 시 다른 변수는 감소)
-                        - **상관계수 0**: 상관관계 없음
-                        """
-                    )
-                    
-                    st.write("---")
-                    st.subheader("산점도 시각화")
-                    fig_scatter = px.scatter(
-                        st.session_state.df_combined,
-                        x='검색량',
-                        y='수입 중량',
-                        trendline='ols',
-                        title='검색량과 수입량의 상관관계',
-                        labels={'검색량': '네이버 검색량', '수입 중량': '수입량 (kg)'}
-                    )
-                    st.plotly_chart(fig_scatter, use_container_width=True)
-
-                    st.info("💡 **인사이트**: 검색량과 수입량 간의 양의 상관관계가 보인다면, 검색량 증가는 미래의 수요 증가를 시사합니다. 이를 통해 수입 물량 결정에 참고할 수 있습니다.")
-                else:
-                    st.warning("선택한 HS코드에 대한 데이터가 존재하지 않아 상관관계 분석을 활성화할 수 없습니다.")
-
-            with tab4:
-                st.header("공급망 분석")
-                
-                if not df_filtered.empty:
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.subheader("원산지별 수입량 비중")
-                        df_pie = df_filtered.groupby('Origin Country')['Volume'].sum().reset_index()
-                        fig_pie = px.pie(
-                            df_pie, 
-                            values='Volume', 
-                            names='Origin Country', 
-                            title='총 수입 중량 비중',
-                            labels={'Volume': '수입 중량'}
-                        )
-                        fig_pie.update_traces(textinfo='percent+label')
-                        st.plotly_chart(fig_pie, use_container_width=True)
-
-                    with col2:
-                        st.subheader("핵심 원산지 수입량 추이")
-                        top_2_countries = df_filtered.groupby('Origin Country')['Volume'].sum().nlargest(2).index.tolist()
-                        if len(top_2_countries) > 1:
-                            df_top2 = df_filtered[df_filtered['Origin Country'].isin(top_2_countries)].copy()
-                            df_top2_monthly = df_top2.groupby([
-                                pd.Grouper(key='Date', freq='M'), 'Origin Country'
-                            ])['Volume'].sum().reset_index()
-                            
-                            fig_top2 = px.line(
-                                df_top2_monthly, 
-                                x='Date', 
-                                y='Volume', 
-                                color='Origin Country',
-                                title=f"{top_2_countries[0]} vs. {top_2_countries[1]} 수입량 추이",
-                                labels={'Volume': '수입 중량 (kg)', 'Date': '기간'}
-                            )
-                            st.plotly_chart(fig_top2, use_container_width=True)
-                        else:
-                            st.warning("분석할 상위 2개 국가 데이터가 충분하지 않습니다.")
-                    
-                    st.subheader("수입/수출업체 현황 분석")
-                    
-                    # Check for the existence of the TDS-specific columns and handle them gracefully
-                    if 'Raw Importer Name' in df_filtered.columns and 'Exporter' in df_filtered.columns and df_filtered['Raw Importer Name'].any() and df_filtered['Exporter'].any():
-                        col_importer, col_exporter = st.columns(2)
-                        
-                        with col_importer:
-                            st.markdown("### 주요 수입업체")
-                            importers_by_volume = df_filtered.groupby('Raw Importer Name')['Volume'].sum().nlargest(10).reset_index()
-                            fig_importer = go.Figure(px.bar(
-                                importers_by_volume,
-                                x='Raw Importer Name',
-                                y='Volume',
-                                title='수입량 기준 상위 10개 수입업체',
-                                labels={'Raw Importer Name': '수입업체', 'Volume': '수입 중량 (kg)'}
-                            ))
-                            fig_importer.update_traces(hovertemplate='<b>%{x}</b><br>수입 중량: %{y:,.0f} kg<extra></extra>')
-                            st.plotly_chart(fig_importer, use_container_width=True)
-
-                        with col_exporter:
-                            st.markdown("### 주요 수출업체")
-                            exporters_by_volume = df_filtered.groupby('Exporter')['Volume'].sum().nlargest(10).reset_index()
-                            fig_exporter = go.Figure(px.bar(
-                                exporters_by_volume,
-                                x='Exporter',
-                                y='Volume',
-                                title='수입량 기준 상위 10개 수출업체',
-                                labels={'Exporter': '수출업체', 'Volume': '수입 중량 (kg)'}
-                            ))
-                            fig_exporter.update_traces(hovertemplate='<b>%{x}</b><br>수입 중량: %{y:,.0f} kg<extra></extra>')
-                            st.plotly_chart(fig_exporter, use_container_width=True)
-
-                        st.subheader("특정 원산지별 업체 분석")
-                        
-                        all_countries = df_filtered['Origin Country'].dropna().unique().tolist()
-                        selected_country_importer = st.selectbox(
-                            "업체 현황을 분석할 원산지를 선택하세요",
-                            options=all_countries
-                        )
-                        
-                        if selected_country_importer:
-                            df_country_importers = df_filtered[df_filtered['Origin Country'] == selected_country_importer].copy()
-                            if not df_country_importers.empty:
-                                df_importers_ranked = df_country_importers.groupby('Raw Importer Name')['Volume'].sum().nlargest(10).reset_index()
-                                
-                                st.markdown(f"**{selected_country_importer}에서 가장 많이 수입하는 업체**")
-                                fig_country_importers = go.Figure(px.bar(
-                                    df_importers_ranked,
-                                    x='Raw Importer Name',
-                                    y='Volume',
-                                    title=f"{selected_country_importer} 수입량 기준 상위 10개 업체",
-                                    labels={'Raw Importer Name': '수입업체', 'Volume': '수입 중량 (kg)'}
-                                ))
-                                fig_country_importers.update_traces(hovertemplate='<b>%{x}</b><br>수입 중량: %{y:,.0f} kg<extra></extra>')
-                                st.plotly_chart(fig_country_importers, use_container_width=True)
-
-                                all_importers = df_filtered['Raw Importer Name'].dropna().unique().tolist()
-                                country_importers = df_country_importers['Raw Importer Name'].dropna().unique().tolist()
-                                other_importers = [imp for imp in all_importers if imp not in country_importers]
-                                
-                                df_other_importers = df_filtered[df_filtered['Raw Importer Name'].isin(other_importers)].copy()
-                                df_other_importers_ranked = df_other_importers.groupby('Raw Importer Name')['Volume'].sum().nlargest(10).reset_index()
-                                
-                                if not df_other_importers_ranked.empty:
-                                    st.markdown(f"**{selected_country_importer} 외 다른 국가에서 많이 수입하는 업체**")
-                                    fig_other_importers = go.Figure(px.bar(
-                                        df_other_importers_ranked,
-                                        x='Raw Importer Name',
-                                        y='Volume',
-                                        title=f"{selected_country_importer} 외 수입량 기준 상위 10개 업체",
-                                        labels={'Raw Importer Name': '수입업체', 'Volume': '수입 중량 (kg)'}
-                                    ))
-                                    fig_other_importers.update_traces(hovertemplate='<b>%{x}</b><br>수입 중량: %{y:,.0f} kg<extra></extra>')
-                                    st.plotly_chart(fig_other_importers, use_container_width=True)
-                                else:
-                                    st.warning(f"다른 국가에서 수입하는 업체 정보가 없습니다.")
-                            else:
-                                st.warning(f"선택한 {selected_country_importer}에 대한 업체 데이터가 충분하지 않습니다.")
-                    else:
-                        st.warning("TDS 데이터에 '수출업체' 또는 '수입업체' 정보가 없어 분석할 수 없습니다.")
-                else:
-                    st.warning("선택한 HS코드에 대한 데이터가 존재하지 않아 공급망 분석을 활성화할 수 없습니다.")
-
-            with tab5:
-                st.header("원본 데이터")
-                st.subheader("관세청 데이터")
-                st.dataframe(st.session_state.df_imports, use_container_width=True)
-                st.subheader("네이버 데이터랩 검색량")
-                st.dataframe(st.session_state.df_naver, use_container_width=True)
-                st.subheader("TDS 데이터")
-                st.dataframe(st.session_state.df_tds, use_container_width=True)
