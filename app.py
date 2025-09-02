@@ -47,8 +47,10 @@ def read_gsheet(_gs_client, sheet_name):
         for col in df.columns:
             if '가격' in col or '량' in col or '액' in col or 'Price' in col or 'Value' in col or 'Volume' in col:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
-            elif '일자' in col or 'Date' in col:
+            # --- [FIX START] '날짜' 컬럼도 날짜 형식으로 변환하도록 수정 ---
+            elif '일자' in col or 'Date' in col or '날짜' in col:
                 df[col] = pd.to_datetime(df[col], errors='coerce')
+            # --- [FIX END] ---
         return df
     except gspread.exceptions.WorksheetNotFound:
         return pd.DataFrame()
