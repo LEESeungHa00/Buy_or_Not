@@ -9,30 +9,40 @@ from pytrends.request import TrendReq
 import json
 import urllib.request
 import yfinance as yf
+from google.oauth2 import service_account
+from google.cloud import bigquery
+import pandas_gbq
 
-# --- BigQuery Connection ---
-# st.connection의 이름을 secrets.toml의 [connections.gcp_bigquery]와 일치시킵니다.
+# --- BigQuery Connection (Manual Method for Stability) ---
 @st.cache_resource
 def get_bq_connection():
-    """BigQuery에 연결하고 커넥션 객체를 반환합니다."""
+    """BigQuery에 직접 연결하고 클라이언트 객체를 반환합니다."""
     try:
-        # 이 이름은 secrets.toml의 [connections.gcp_bigquery] 섹션을 직접 가리킵니다.
-        return st.connection("gcp_bigquery", type="bigquery")
+        # st.secrets에서 직접 인증 정보 가져오기
+        creds_dict = st.secrets["gcp_service_account"]
+        creds = service_account.Credentials.from_service_account_info(creds_dict)
+        # BigQuery 클라이언트 생성
+        client = bigquery.Client(credentials=creds, project=creds.project_id)
+        return client
     except Exception as e:
-        st.error(f"Google BigQuery 연결에 실패했습니다. secrets.toml 설정을 확인하세요: {e}")
+        st.error(f"Google BigQuery 연결에 실패했습니다. secrets.toml의 [gcp_service_account] 설정을 확인하세요: {e}")
         return None
 
 # --- Data Fetching & Processing Functions (BigQuery Version) ---
-def get_trade_data_from_bq(conn):
+def get_trade_data_from_bq(client):
     """BigQuery의 tds_data 테이블에서 데이터를 로드합니다."""
+    project_id = client.project
+    table_id = f"{project_id}.data_explorer.tds_data"
     try:
-        count_query = "SELECT count(*) FROM `data_explorer.tds_data`"
-        count_result = conn.query(count_query)
+        count_query = f"SELECT count(*) FROM `{table_id}`"
+        count_result = client.query(count_query).to_dataframe()
         total_rows = count_result.iloc[0,0]
         
         with st.spinner(f"BigQuery에서 {total_rows:,}개의 행을 로드하는 중..."):
-            df = conn.query("SELECT * FROM `data_explorer.tds_data`", ttl=600)
+            sql = f"SELECT * FROM `{table_id}`"
+            df = client.query(sql).to_dataframe()
 
+        # 데이터 타입 변환
         for col in df.columns:
             if 'price' in col.lower() or 'value' in col.lower() or 'volume' in col.lower():
                 df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -43,19 +53,21 @@ def get_trade_data_from_bq(conn):
         st.error(f"BigQuery에서 TDS 데이터를 읽는 중 오류 발생: {e}")
         return pd.DataFrame()
 
-def add_trade_data_to_bq(conn, df):
+def add_trade_data_to_bq(client, df):
     """새로운 데이터를 BigQuery 테이블에 추가합니다."""
+    project_id = client.project
+    table_id = f"{project_id}.data_explorer.tds_data"
     try:
+        # BigQuery 규칙에 맞게 컬럼 이름 변경
         df.columns = df.columns.str.replace(' ', '_').str.replace('[^A-Za-z0-9_]', '', regex=True)
         with st.spinner("새 데이터를 BigQuery에 저장하는 중..."):
-            # 테이블이 없으면 만들고, 있으면 데이터 추가
-            conn.write_df(df, "data_explorer.tds_data", if_exists="append")
+            # pandas_gbq를 사용하여 데이터 추가
+            pandas_gbq.to_gbq(df, table_id, project_id=project_id, if_exists="append", credentials=client._credentials)
         st.success("새 데이터가 BigQuery에 성공적으로 저장되었습니다.")
     except Exception as e:
         st.error(f"BigQuery에 데이터를 저장하는 중 오류 발생: {e}")
 
-
-# (기타 fetch 함수들은 기존과 동일하게 유지)
+# (기타 API fetch 함수들은 기존과 동일하게 유지)
 def fetch_yfinance_data(tickers, start_date, end_date):
     all_data = []
     for name, ticker in tickers.items():
@@ -134,8 +146,8 @@ KAMIS_ITEMS = {"채소류": {"배추": "111", "무": "112", "양파": "114", "�
 st.set_page_config(layout="wide")
 st.title("📊 데이터 탐색 및 통합 대시보드 (Google BigQuery 연동)")
 
-bq_conn = get_bq_connection()
-if bq_conn is None: st.stop()
+bq_client = get_bq_connection()
+if bq_client is None: st.stop()
 
 st.sidebar.header("⚙️ 분석 설정")
 
@@ -145,7 +157,7 @@ if 'data_loaded' not in st.session_state:
 
 if not st.session_state.data_loaded:
     if st.sidebar.button("🚀 데이터 분석 시작하기 (BigQuery에서 불러오기)"):
-        st.session_state.raw_trade_df = get_trade_data_from_bq(bq_conn)
+        st.session_state.raw_trade_df = get_trade_data_from_bq(bq_client)
         if st.session_state.raw_trade_df is not None and not st.session_state.raw_trade_df.empty:
             st.session_state.data_loaded = True
             st.rerun()
@@ -158,7 +170,7 @@ if not st.session_state.data_loaded:
         if uploaded_file:
             if st.sidebar.button("업로드 파일 BigQuery에 저장"):
                 df_new = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
-                add_trade_data_to_bq(bq_conn, df_new)
+                add_trade_data_to_bq(bq_client, df_new)
                 st.session_state.data_loaded = False # Reset state to force reload
                 st.rerun()
         st.stop()
