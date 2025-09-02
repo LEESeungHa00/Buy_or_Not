@@ -11,7 +11,24 @@ import json
 import urllib.request
 import yfinance as yf
 
-# --- Data Fetching Functions ---
+# --- Data Fetching and Caching Functions ---
+@st.cache_data
+def load_trade_data(uploaded_file):
+    """
+    업로드된 수출입 데이터 파일을 읽고 전처리합니다.
+    이 함수는 캐시되어 파일 재로딩으로 인한 딜레이를 방지합니다.
+    """
+    try:
+        df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
+        if 'Date' not in df.columns or 'Category' not in df.columns:
+            st.error("업로드된 파일에 'Date'와 'Category' 컬럼이 모두 필요합니다.")
+            return None
+        df['Date'] = pd.to_datetime(df['Date'])
+        return df
+    except Exception as e:
+        st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
+        return None
+
 @st.cache_data(ttl=3600)
 def fetch_yfinance_data(ticker, name, start_date, end_date):
     """Yahoo Finance에서 지정된 티커의 과거 데이터를 가져옵니다."""
@@ -100,27 +117,24 @@ uploaded_file = st.sidebar.file_uploader("1. 수출입 데이터 파일 업로�
 raw_trade_df = None
 selected_categories = []
 search_keywords = []
+start_date = None
+end_date = None
 
 if uploaded_file:
-    try:
-        raw_trade_df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
-        if 'Date' in raw_trade_df.columns and 'Category' in raw_trade_df.columns:
-            raw_trade_df['Date'] = pd.to_datetime(raw_trade_df['Date'])
-            start_date = raw_trade_df['Date'].min()
-            end_date = raw_trade_df['Date'].max()
-            
-            category_options = sorted(raw_trade_df['Category'].unique())
-            selected_categories = st.sidebar.multiselect("2. 분석할 품목 카테고리 선택", category_options, default=category_options[0] if category_options else None)
-            
-            keyword_input = st.sidebar.text_input("3. 검색어 입력 (쉼표로 구분)", ", ".join(selected_categories) if selected_categories else "")
-            search_keywords = [k.strip() for k in keyword_input.split(',') if k.strip()]
-
-        else:
-            st.error("업로드된 파일에 'Date'와 'Category' 컬럼이 모두 필요합니다.")
-            st.stop()
-    except Exception as e:
-        st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
-        st.stop()
+    # 캐시된 함수를 사용하여 데이터를 빠르고 효율적으로 로드
+    raw_trade_df = load_trade_data(uploaded_file)
+    
+    if raw_trade_df is not None:
+        start_date = raw_trade_df['Date'].min()
+        end_date = raw_trade_df['Date'].max()
+        
+        category_options = sorted(raw_trade_df['Category'].unique())
+        selected_categories = st.sidebar.multiselect("2. 분석할 품목 카테고리 선택", category_options, default=category_options[0] if category_options else None)
+        
+        keyword_input = st.sidebar.text_input("3. 검색어 입력 (쉼표로 구분)", ", ".join(selected_categories) if selected_categories else "")
+        search_keywords = [k.strip() for k in keyword_input.split(',') if k.strip()]
+    else:
+        st.stop() # 데이터 로드 실패 시 앱 실행 중지
 else:
     st.info("👈 사이드바에서 분석할 수출입 데이터 파일을 업로드해주세요.")
     st.stop()
