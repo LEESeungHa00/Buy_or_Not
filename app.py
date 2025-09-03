@@ -19,6 +19,7 @@ from statsmodels.tsa.seasonal import seasonal_decompose
 from prophet import Prophet
 from prophet.plot import plot_plotly
 import feedparser
+from urllib.parse import quote
 
 # --- BigQuery Connection (Manual Method for Stability) ---
 @st.cache_resource
@@ -112,10 +113,11 @@ def fetch_historical_news(client, keywords, start_date, end_date, models):
     for keyword in keywords:
         for lang, country in [('ko', 'KR'), ('en', 'US')]:
             with st.spinner(f"과거 뉴스 수집 중: '{keyword}' ({lang})... (시간이 매우 오래 걸릴 수 있습니다)"):
-                news_url = f"https://news.google.com/search?q={keyword}&hl={lang}&gl={country}&ceid={country}%3A{lang}"
+                keyword_encoded = quote(keyword)
+                news_url = f"https://news.google.com/search?q={keyword_encoded}&hl={lang}&gl={country}&ceid={country}%3A{lang}"
                 paper = build(news_url, memoize_articles=False, language=lang)
                 keyword_articles = []
-                for article in paper.articles[:50]: # Limit articles to avoid timeout
+                for article in paper.articles[:50]:
                     try:
                         article.download(); article.parse()
                         pub_date = article.publish_date
@@ -138,7 +140,8 @@ def fetch_latest_news_rss(client, keywords, models):
     for keyword in keywords:
         for lang, country in [('ko', 'KR'), ('en', 'US')]:
             with st.spinner(f"최신 뉴스 수집 중: '{keyword}' ({lang})..."):
-                rss_url = f"https://news.google.com/rss/search?q={keyword}&hl={lang}&gl={country}&ceid={country}:{lang}"
+                keyword_encoded = quote(keyword)
+                rss_url = f"https://news.google.com/rss/search?q={keyword_encoded}&hl={lang}&gl={country}&ceid={country}:{lang}"
                 feed = feedparser.parse(rss_url)
                 keyword_articles = []
                 for entry in feed.entries[:25]:
@@ -178,6 +181,10 @@ def fetch_trends_data(keywords, start_date, end_date, naver_keys):
             pytrends.build_payload([keyword], cat=0, timeframe=timeframe, geo='KR', gprop='')
             google_df = pytrends.interest_over_time()
             if not google_df.empty and keyword in google_df.columns:
+                # --- [FIX START] isPartial 컬럼을 미리 제거하여 병합 오류 방지 ---
+                if 'isPartial' in google_df.columns:
+                    google_df = google_df.drop(columns=['isPartial'])
+                # --- [FIX END] ---
                 google_df_renamed = google_df.reset_index().rename(columns={'date': '날짜', keyword: f'Google_{keyword}'})
                 keyword_dfs.append(google_df_renamed)
 
@@ -228,6 +235,10 @@ def fetch_kamis_data(item_info, start_date, end_date, kamis_keys):
     return df
 
 # --- Constants & App ---
+COFFEE_TICKERS_YFINANCE = {"미국 커피 C": "KC=F", "런던 로부스타": "RC=F"}
+KAMIS_CATEGORIES = {"채소류": "100", "과일류": "200", "축산물": "300", "수산물": "400"}
+KAMIS_ITEMS = {"채소류": {"배추": "111", "무": "112", "양파": "114", "마늘": "141"}, "과일류": {"사과": "211", "바나나": "214", "아보카도": "215"}, "축산물": {"소고기": "311", "돼지고기": "312"}, "수산물": {"고등어": "411", "오징어": "413"}}
+
 st.set_page_config(layout="wide")
 st.title("📊 데이터 탐색 및 통합 분석 대시보드")
 
@@ -294,10 +305,6 @@ except Exception as e:
     st.error(f"데이터 처리 중 오류: {e}"); st.stop()
 
 # --- External Data Loading Section ---
-COFFEE_TICKERS_YFINANCE = {"미국 커피 C": "KC=F", "런던 로부스타": "RC=F"}
-KAMIS_CATEGORIES = {"채소류": "100", "과일류": "200", "축산물": "300", "수산물": "400"}
-KAMIS_ITEMS = {"채소류": {"배추": "111", "무": "112", "양파": "114", "마늘": "141"}, "과일류": {"사과": "211", "바나나": "214", "아보카도": "215"}, "축산물": {"소고기": "311", "돼지고기": "312"}, "수산물": {"고등어": "411", "오징어": "413"}}
-
 st.sidebar.subheader("🔗 외부 가격 데이터")
 is_coffee_selected = any('커피' in str(cat) for cat in selected_categories)
 if is_coffee_selected:
