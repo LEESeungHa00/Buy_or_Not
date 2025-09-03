@@ -219,42 +219,70 @@ def fetch_trends_data(keywords, start_date, end_date, naver_keys):
     return reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), all_data)
 
 def fetch_kamis_data(client, item_info, start_date, end_date, kamis_keys):
-    project_id = client.project; table_name = "kamis_cache"
-    table_id = f"{project_id}.data_explorer.{table_name}"; item_code = item_info['item_code']; kind_code = item_info['kind_code']
-    try:
-        sql = f"SELECT Date AS 날짜, Price AS 도매가격_원 FROM {table_id} WHERE ItemCode = '{item_code}' AND KindCode = '{kind_code}' AND Date >= '{start_date.strftime('%Y-%m-%d')}' AND Date <= '{end_date.strftime('%Y-%m-%d')}'"
-        df_cache = client.query(sql).to_dataframe()
-        if len(df_cache) >= (end_date - start_date).days * 0.8:
-            st.sidebar.info(f"'{item_info['item_name']}-{item_info['kind_name']}' KAMIS 데이터를 BigQuery 캐시에서 로드했습니다.")
-            df_cache['날짜'] = pd.to_datetime(df_cache['날짜'])
-            return df_cache
-    except Exception: pass
-    all_data = []
-    date_range = pd.date_range(start=start_date, end=end_date)
-    progress_bar = st.sidebar.progress(0, text="KAMIS 데이터 API 조회 중...")
-    for i, date in enumerate(date_range):
-        date_str = date.strftime('%Y-%m-%d')
-        url = (f"http://www.kamis.or.kr/service/price/xml.do?p_product_cls_code=01&p_regday={date_str}"
-               f"&p_item_category_code={item_info['cat_code']}&p_item_code={item_code}&p_kind_code={kind_code}"
-               f"&p_product_rank_code={item_info['rank_code']}&p_convert_kg_yn=Y"
-               f"&p_cert_key={kamis_keys['key']}&p_cert_id={kamis_keys['id']}&p_returntype=json")
+    # [수정] API 호출에 사용할 시작일과 종료일 포맷
+    start_str = start_date.strftime('%Y-%m-%d')
+    end_str = end_date.strftime('%Y-%m-%d')
+    
+    item_code = item_info['item_code']
+    kind_code = item_info['kind_code']
+
+    # BigQuery 캐시 확인 로직은 그대로 유지할 수 있습니다 (선택사항)
+    # ...
+
+    with st.spinner("KAMIS에서 기간 데이터를 한 번에 조회하는 중..."):
+        # [수정] periodWholesaleProductList 액션을 사용하는 새 URL
+        url = (
+            "http://www.kamis.or.kr/service/price/xml.do"
+            "?action=periodWholesaleProductList"
+            f"&p_product_cls_code=01"
+            f"&p_startday={start_str}"
+            f"&p_endday={end_str}"
+            f"&p_item_category_code={item_info['cat_code']}"
+            f"&p_item_code={item_code}"
+            f"&p_kind_code={kind_code}"
+            f"&p_product_rank_code={item_info['rank_code']}"
+            f"&p_convert_kg_yn=Y"
+            f"&p_cert_key={kamis_keys['key']}"
+            f"&p_cert_id={kamis_keys['id']}"
+            f"&p_returntype=json"
+        )
+        
         try:
-            response = requests.get(url, timeout=10)
+            response = requests.get(url, timeout=20)
             if response.status_code == 200:
                 data = response.json()
-                if "data" in data and data["data"] and "item" in data["data"]:
-                    price_str = data["data"]["item"][0].get('price', '0').replace(',', '')
-                    if price_str.isdigit() and int(price_str) > 0:
-                        all_data.append({'Date': date, 'Price': int(price_str), 'ItemCode': item_code, 'KindCode': kind_code})
-        except Exception: continue
-        finally: progress_bar.progress((i + 1) / len(date_range))
-    progress_bar.empty()
-    if not all_data: st.sidebar.warning("해당 기간에 대한 KAMIS 데이터가 없습니다."); return pd.DataFrame()
-    df_new = pd.DataFrame(all_data)
-    deduplicate_and_write_to_bq(client, df_new, table_name, subset_cols=['Date', 'ItemCode', 'KindCode'])
-    df_new['Date'] = pd.to_datetime(df_new['Date'])
-    # [수정] 날짜 컬럼 이름을 '날짜'로 통일
-    return df_new.rename(columns={'Date': '날짜', 'Price': '도매가격_원'})
+                # API 응답에 따라 'data' 키가 없을 수도, 'item'이 없을 수도 있음
+                if data and "data" in data and data["data"] and "item" in data["data"]:
+                    price_data = data["data"]["item"]
+                    
+                    if not price_data:
+                        st.sidebar.warning("해당 기간에 대한 KAMIS 데이터가 없습니다.")
+                        return pd.DataFrame()
+                        
+                    df_new = pd.DataFrame(price_data)
+                    
+                    # [수정] 데이터프레임 컬럼 정리
+                    # API 응답 컬럼명(예: yyyy, regday, price)을 앱에서 사용하는 이름으로 변경
+                    df_new = df_new.rename(columns={'regday': '날짜', 'price': '도매가격_원'})
+                    
+                    # 필요한 컬럼만 선택하고 데이터 타입 변환
+                    df_new = df_new[['날짜', '도매가격_원']]
+                    df_new['날짜'] = pd.to_datetime(df_new['날짜'])
+                    # 가격 문자열에서 쉼표(,) 제거 후 숫자 타입으로 변환
+                    df_new['도매가격_원'] = pd.to_numeric(df_new['도매가격_원'].str.replace(',', ''), errors='coerce')
+                    
+                    # BigQuery에 캐시로 저장하는 로직을 여기에 추가할 수 있습니다.
+                    
+                    return df_new
+                else:
+                    st.sidebar.warning("해당 기간에 대한 KAMIS 데이터가 없습니다.")
+                    return pd.DataFrame()
+
+        except Exception as e:
+            st.sidebar.error(f"KAMIS API 호출 중 오류 발생: {e}")
+            return pd.DataFrame()
+
+    return pd.DataFrame()
 
 # --- Constants & App ---
 COFFEE_TICKERS_YFINANCE = {"미국 커피 C": "KC=F", "런던 로부스타": "RC=F"}
