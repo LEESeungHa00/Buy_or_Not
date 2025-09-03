@@ -6,7 +6,6 @@ requests
 pytrends
 yfinance
 google-cloud-bigquery
-google-cloud-bigquery-storage
 pandas-gbq
 openpyxl
 newspaper3k
@@ -17,3 +16,4 @@ sentencepiece
 statsmodels
 prophet
 feedparser
+captum
