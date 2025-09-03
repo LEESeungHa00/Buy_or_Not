@@ -135,9 +135,13 @@ def call_naver_api(url, body, naver_keys):
         st.error(f"API 호출 중 알 수 없는 오류 발생: {e}")
         return None
 
+
 @st.cache_data(ttl=3600)
 def fetch_naver_trends_data(keywords, start_date, end_date, naver_keys):
-    """네이버 데이터랩(검색어 트렌드, 쇼핑인사이트) 데이터를 가져옵니다."""
+    """
+    네이버 데이터랩(검색어 트렌드, 쇼핑인사이트) 데이터를 가져옵니다.
+    키워드에 따라 자동으로 쇼핑인사이트 카테고리 ID를 매칭합니다.
+    """
     if (end_date - start_date).days > 90:
         st.sidebar.error("네이버 트렌드 조회 기간은 최대 3개월(90일)입니다.")
         return pd.DataFrame()
@@ -151,20 +155,34 @@ def fetch_naver_trends_data(keywords, start_date, end_date, naver_keys):
 
     for keyword in keywords:
         keyword_dfs = []
-        with st.spinner(f"'{keyword}' 네이버 트렌드 데이터 가져오는 중..."):
+        with st.spinner(f"'{keyword}' 네이버 트렌드 데이터를 가져오는 중..."):
             if naver_keys['id'] and naver_keys['secret']:
-                # 1. 네이버 검색어 트렌드 API
-                body_search = json.dumps({"startDate": start_date.strftime('%Y-%m-%d'), "endDate": end_date.strftime('%Y-%m-%d'), "timeUnit": "date", "keywordGroups": [{"groupName": keyword, "keywords": [keyword]}]})
+                # 1. 네이버 검색어 트렌드 API 호출 (이 부분은 구조가 원래 맞았음)
+                body_search = json.dumps({
+                    "startDate": start_date.strftime('%Y-%m-%d'), 
+                    "endDate": end_date.strftime('%Y-%m-%d'), 
+                    "timeUnit": "date", 
+                    "keywordGroups": [{"groupName": keyword, "keywords": [keyword]}]
+                })
                 search_res = call_naver_api("https://openapi.naver.com/v1/datalab/search", body_search, naver_keys)
                 if search_res and search_res.get('results'):
                     df_search = pd.DataFrame(search_res['results'][0]['data'])
                     keyword_dfs.append(df_search.rename(columns={'period': '날짜', 'ratio': f'NaverSearch_{keyword}'}))
 
-                # 2. 네이버 쇼핑인사이트 API
+                # 2. 네이버 쇼핑인사이트 API 호출
                 lower_keyword = keyword.lower().replace(' ', '')
                 if lower_keyword in NAVER_SHOPPING_CAT_MAP:
                     category_id = NAVER_SHOPPING_CAT_MAP[lower_keyword]
-                    body_shop = json.dumps({"startDate": start_date.strftime('%Y-%m-%d'), "endDate": end_date.strftime('%Y-%m-%d'), "timeUnit": "date", "category": category_id, "keyword": keyword})
+                    
+                    # [수정] API 문서에 맞는 배열/객체 형태로 구조 변경
+                    body_shop = json.dumps({
+                        "startDate": start_date.strftime('%Y-%m-%d'),
+                        "endDate": end_date.strftime('%Y-%m-%d'),
+                        "timeUnit": "date",
+                        "category": [{"name": keyword, "param": [category_id]}],
+                        "keyword": [{"name": keyword, "param": [keyword]}]
+                    })
+                    
                     shop_res = call_naver_api("https://openapi.naver.com/v1/datalab/shopping/categories", body_shop, naver_keys)
                     if shop_res and shop_res.get('results'):
                         df_shop = pd.DataFrame(shop_res['results'][0]['data'])
@@ -178,7 +196,9 @@ def fetch_naver_trends_data(keywords, start_date, end_date, naver_keys):
                 merged_df = reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), keyword_dfs)
                 all_data.append(merged_df)
 
-    if not all_data: return pd.DataFrame()
+    if not all_data: 
+        return pd.DataFrame()
+        
     return reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), all_data)
 
 def fetch_kamis_data(client, item_info, start_date, end_date, kamis_keys):
