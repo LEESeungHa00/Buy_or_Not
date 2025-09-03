@@ -131,7 +131,7 @@ def fetch_historical_news(client, keywords, start_date, end_date, models):
                     except Exception: continue
                 if keyword_articles: all_news_data.append(pd.DataFrame(keyword_articles))
     
-    if not all_news_data: st.sidebar.warning("수집된 과거 뉴스가 없습니다."); return
+    if not all_news_data: st.sidebar.warning("수집된 과거 뉴스가 없습니다."); return pd.DataFrame()
     final_df = pd.concat(all_news_data, ignore_index=True)
     deduplicate_and_write_to_bq(client, final_df, "news_sentiment_cache")
     return final_df
@@ -158,7 +158,7 @@ def fetch_latest_news_rss(client, keywords, models):
                     except Exception: continue
                 if keyword_articles: all_news_data.append(pd.DataFrame(keyword_articles))
 
-    if not all_news_data: st.sidebar.warning("수집된 최신 뉴스가 없습니다."); return
+    if not all_news_data: st.sidebar.warning("수집된 최신 뉴스가 없습니다."); return pd.DataFrame()
     final_df = pd.concat(all_news_data, ignore_index=True)
     deduplicate_and_write_to_bq(client, final_df, "news_sentiment_cache")
     return final_df
@@ -304,6 +304,12 @@ try:
 except Exception as e:
     st.error(f"데이터 처리 중 오류: {e}"); st.stop()
 
+# --- [FIX START] Pre-initialize all raw dataframes ---
+raw_wholesale_df = st.session_state.get('wholesale_data', pd.DataFrame())
+raw_search_df = st.session_state.get('search_data', pd.DataFrame())
+raw_news_df = st.session_state.get('news_data', pd.DataFrame())
+# --- [FIX END] ---
+
 # --- External Data Loading Section ---
 st.sidebar.subheader("🔗 외부 가격 데이터")
 is_coffee_selected = any('커피' in str(cat) for cat in selected_categories)
@@ -312,6 +318,7 @@ if is_coffee_selected:
     if st.sidebar.button("선물가격 데이터 가져오기"):
         df = fetch_yfinance_data(COFFEE_TICKERS_YFINANCE, start_date, end_date)
         st.session_state['wholesale_data'] = df
+        st.rerun()
 else:
     st.sidebar.info("KAMIS에서 농산물 도매가격 데이터를 가져옵니다.")
     kamis_api_key = st.sidebar.text_input("KAMIS API Key", type="password")
@@ -324,8 +331,8 @@ else:
                 item_info = {'item_code': KAMIS_ITEMS[cat_name][item_name], 'cat_code': KAMIS_CATEGORIES[cat_name]}
                 df = fetch_kamis_data(item_info, start_date, end_date, {'key': kamis_api_key, 'id': kamis_api_id})
                 st.session_state['wholesale_data'] = df
+                st.rerun()
             else: st.sidebar.error("KAMIS API Key와 ID를 모두 입력해주세요.")
-raw_wholesale_df = st.session_state.get('wholesale_data', pd.DataFrame())
 
 # --- Search Data Loading Section ---
 st.sidebar.subheader("📰 검색량 데이터")
@@ -336,7 +343,7 @@ if st.sidebar.button("검색량 데이터 가져오기"):
     else:
         df = fetch_trends_data(search_keywords, start_date, end_date, {'id': naver_client_id, 'secret': naver_client_secret})
         st.session_state['search_data'] = df
-raw_search_df = st.session_state.get('search_data', pd.DataFrame())
+        st.rerun()
 
 # --- News Analysis Section ---
 st.sidebar.subheader("📰 뉴스 감성 분석")
@@ -354,7 +361,6 @@ with st.sidebar.expander("⏳ 과거 뉴스 데이터 일괄 수집 (일회성, 
         df = fetch_historical_news(bq_client, search_keywords, one_year_ago, datetime.now(), sentiment_models)
         st.session_state['news_data'] = df
         st.rerun()
-raw_news_df = st.session_state.get('news_data', pd.DataFrame())
 
 # --- Main Display Area ---
 tab_list = ["1️⃣ 원본 데이터", "2️⃣ 데이터 표준화", "3️⃣ 뉴스 감성 분석", "4️⃣ 상관관계 분석", "📈 시계열 분해 및 예측"]
@@ -391,7 +397,6 @@ with tab2:
 
         news_weekly = pd.DataFrame()
         if not raw_news_df.empty:
-            # --- [FIX] Ensure Date column is datetime before filtering ---
             raw_news_df['Date'] = pd.to_datetime(raw_news_df['Date'])
             news_df_in_range = raw_news_df[(raw_news_df['Date'] >= start_date) & (raw_news_df['Date'] <= end_date)]
             if not news_df_in_range.empty:
