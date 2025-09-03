@@ -33,7 +33,6 @@ def get_bq_connection():
 def load_sentiment_model():
     """감성 분석 모델을 로드합니다. 최초 실행 시 몇 분 소요될 수 있습니다."""
     with st.spinner("금융/경제 특화 감성 분석 AI 모델을 로드하는 중..."):
-        # --- [UPGRADE] 금융/경제 뉴스에 특화된 모델로 변경 ---
         model_name = "snunlp/KR-FinBERT-SC"
         model = pipeline("sentiment-analysis", model=model_name)
     return model
@@ -84,7 +83,6 @@ def deduplicate_and_write_to_bq(client, df_new, table_name):
             df_existing = pd.DataFrame()
 
         df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-        # 모든 열이 완전히 동일한 경우에만 중복으로 간주
         df_deduplicated = df_combined.drop_duplicates()
 
         with st.spinner(f"중복을 제거한 데이터를 BigQuery '{table_name}' 테이블에 저장하는 중..."):
@@ -128,7 +126,6 @@ def fetch_and_analyze_news(client, keywords, start_date, end_date, model):
                         title_to_analyze = article.title[:256]
                         analysis = model(title_to_analyze)[0]
                         
-                        # --- [UPGRADE] 긍정/부정/중립 레이블을 처리하는 로직 개선 ---
                         label = analysis['label']
                         score = analysis['score']
                         if label == 'positive':
@@ -220,7 +217,12 @@ def fetch_kamis_data(item_info, start_date, end_date, kamis_keys):
     df = pd.DataFrame(all_data)
     return df
 
-# --- Constants & App ---
+# --- [FIX] Constants defined before they are used by the app ---
+COFFEE_TICKERS_YFINANCE = {"미국 커피 C": "KC=F", "런던 로부스타": "RC=F"}
+KAMIS_CATEGORIES = {"채소류": "100", "과일류": "200", "축산물": "300", "수산물": "400"}
+KAMIS_ITEMS = {"채소류": {"배추": "111", "무": "112", "양파": "114", "마늘": "141"}, "과일류": {"사과": "211", "바나나": "214", "아보카도": "215"}, "축산물": {"소고기": "311", "돼지고기": "312"}, "수산물": {"고등어": "411", "오징어": "413"}}
+
+# --- Streamlit App ---
 st.set_page_config(layout="wide")
 st.title("📊 데이터 탐색 및 통합 분석 대시보드")
 
