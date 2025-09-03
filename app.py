@@ -57,15 +57,13 @@ def get_categories_from_bq(_client):
             df = _client.query(query).to_dataframe()
         return sorted(df['Category'].astype(str).unique())
     except Exception as e:
-        # --- [IMPROVEMENT] Show specific error to user ---
         st.error(f"""
         **BigQuery 테이블({table_id})을 읽는 중 오류가 발생했습니다.**
         
         1.  Google Cloud Console에서 **데이터세트(`data_explorer`)**와 **테이블(`tds_data`)**이 정확히 존재하는지 확인해주세요.
-        2.  서비스 계정에 **'BigQuery 데이터 뷰어(BigQuery Data Viewer)'** 역할이 부여되었는지 확인해주세요.
+        2.  서비스 계정에 **'BigQuery 데이터 뷰어'** 및 **'BigQuery 읽기 세션 사용자'** 역할이 부여되었는지 확인해주세요.
         
-        **원본 오류 메시지:**
-        `{e}`
+        **원본 오류 메시지:** `{e}`
         """)
         return []
 
@@ -285,10 +283,24 @@ with st.sidebar.expander("➕ 새 수출입 데이터 추가"):
     uploaded_file = st.file_uploader("새 파일 업로드하여 BigQuery에 추가", type=['csv', 'xlsx'])
     if uploaded_file:
         if st.button("업로드 파일 BigQuery에 저장"):
-            df_new = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
-            add_trade_data_to_bq(bq_client, df_new)
-            st.session_state.clear()
-            st.rerun()
+            try:
+                df_new = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
+                
+                # --- [FIX START] 데이터 클렌징 로직 추가 ---
+                numeric_cols = ['Value', 'Volume', 'Unit_Price', 'UnitPrice'] # 예상되는 숫자 컬럼 이름
+                for col in numeric_cols:
+                    if col in df_new.columns:
+                        df_new[col] = pd.to_numeric(df_new[col], errors='coerce')
+                
+                if 'Date' in df_new.columns:
+                    df_new['Date'] = pd.to_datetime(df_new['Date'], errors='coerce')
+                # --- [FIX END] ---
+
+                add_trade_data_to_bq(bq_client, df_new)
+                st.session_state.clear()
+                st.rerun()
+            except Exception as e:
+                st.error(f"파일 처리 중 오류가 발생했습니다: {e}")
 
 if not st.session_state.data_loaded:
     st.info("👈 사이드바에서 분석할 카테고리를 선택하고 '분석 시작' 버튼을 눌러주세요.")
