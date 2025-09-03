@@ -33,7 +33,9 @@ def get_bq_connection():
 def load_sentiment_model():
     """감성 분석 모델을 로드합니다. 최초 실행 시 몇 분 소요될 수 있습니다."""
     with st.spinner("감성 분석 AI 모델을 로드하는 중..."):
-        model = pipeline("sentiment-analysis", model="monologg/kobert-nsmc")
+        # --- [FIX] 안정적인 최신 모델로 변경 ---
+        model_name = "matthewlee/klue-bert-base-ko-sentiment"
+        model = pipeline("sentiment-analysis", model=model_name)
     return model
 
 # --- Data Fetching & Processing Functions ---
@@ -82,6 +84,7 @@ def deduplicate_and_write_to_bq(client, df_new, table_name):
             df_existing = pd.DataFrame()
 
         df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+        # 모든 열이 완전히 동일한 경우에만 중복으로 간주
         df_deduplicated = df_combined.drop_duplicates()
 
         with st.spinner(f"중복을 제거한 데이터를 BigQuery '{table_name}' 테이블에 저장하는 중..."):
@@ -124,7 +127,8 @@ def fetch_and_analyze_news(client, keywords, start_date, end_date, model):
                     if pub_date and start_date <= pub_date.replace(tzinfo=None) <= end_date:
                         title_to_analyze = article.title[:256]
                         analysis = model(title_to_analyze)[0]
-                        score = analysis['score'] if analysis['label'] == 'positive' else -analysis['score']
+                        # 모델 출력 레이블이 'positive' 또는 'negative'인지 확인
+                        score = analysis['score'] if analysis['label'].lower() == 'positive' else -analysis['score']
                         keyword_articles.append({'Date': pub_date.date(), 'Title': article.title, 'Sentiment': score, 'Keyword': keyword})
                 except Exception: continue
             
