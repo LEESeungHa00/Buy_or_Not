@@ -13,3 +13,5 @@ lxml[html_clean]
 transformers
 torch
 sentencepiece
+statsmodels
+prophet
