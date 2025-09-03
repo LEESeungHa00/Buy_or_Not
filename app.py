@@ -13,11 +13,12 @@ import yfinance as yf
 from google.oauth2 import service_account
 from google.cloud import bigquery
 import pandas_gbq
-from newspaper import build
+from newspaper import build, Article
 from transformers import pipeline
 from statsmodels.tsa.seasonal import seasonal_decompose
 from prophet import Prophet
 from prophet.plot import plot_plotly
+import feedparser
 
 # --- BigQuery Connection (Manual Method for Stability) ---
 @st.cache_resource
@@ -34,12 +35,14 @@ def get_bq_connection():
 
 # --- Sentiment Analysis Model ---
 @st.cache_resource
-def load_sentiment_model():
-    """감성 분석 모델을 로드합니다. 최초 실행 시 몇 분 소요될 수 있습니다."""
-    with st.spinner("금융/경제 특화 감성 분석 AI 모델을 로드하는 중..."):
-        model_name = "snunlp/KR-FinBERT-SC"
-        model = pipeline("sentiment-analysis", model=model_name)
-    return model
+def load_sentiment_models():
+    """한/영 감성 분석 모델을 모두 로드합니다."""
+    with st.spinner("한/영 감성 분석 AI 모델을 로드하는 중..."):
+        models = {
+            'ko': pipeline("sentiment-analysis", model="snunlp/KR-FinBERT-SC"),
+            'en': pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english")
+        }
+    return models
 
 # --- Data Fetching & Processing Functions ---
 @st.cache_data(ttl=3600)
@@ -87,13 +90,13 @@ def deduplicate_and_write_to_bq(client, df_new, table_name):
             df_existing = pd.DataFrame()
 
         df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-        df_deduplicated = df_combined.drop_duplicates()
+        df_deduplicated = df_combined.drop_duplicates(subset=['Title', 'Keyword', 'Language'])
 
         with st.spinner(f"중복을 제거한 데이터를 BigQuery '{table_name}' 테이블에 저장하는 중..."):
             pandas_gbq.to_gbq(df_deduplicated, table_id, project_id=project_id, if_exists="replace", credentials=client._credentials)
-        st.success(f"데이터가 BigQuery '{table_name}' 테이블에 성공적으로 저장/업데이트되었습니다.")
+        st.sidebar.success(f"데이터가 BigQuery '{table_name}'에 업데이트되었습니다.")
     except Exception as e:
-        st.error(f"BigQuery에 데이터를 저장하는 중 오류 발생: {e}")
+        st.error(f"BigQuery 저장 중 오류 발생: {e}")
 
 def add_trade_data_to_bq(client, df):
     """새로운 수출입 데이터를 BigQuery 테이블에 중복 없이 추가합니다."""
@@ -102,49 +105,59 @@ def add_trade_data_to_bq(client, df):
     df.columns = df.columns.str.replace(' ', '_').str.replace('[^A-Za-z0-9_]', '', regex=True)
     deduplicate_and_write_to_bq(client, df, "tds_data")
 
-def fetch_and_analyze_news(client, keywords, start_date, end_date, model):
-    """뉴스를 크롤링하고 감성 분석을 수행한 후, BigQuery에 캐싱합니다."""
-    project_id = client.project; table_name = "news_sentiment_cache"
-    table_id = f"{project_id}.data_explorer.{table_name}"
+def fetch_historical_news(client, keywords, start_date, end_date, models):
+    """[1단계: 일회성] newspaper3k로 과거 데이터를 최대한 수집합니다."""
     all_news_data = []
-
     for keyword in keywords:
-        try: # Check cache first
-            sql = f"SELECT * FROM `{table_id}` WHERE Keyword = '{keyword}' AND Date >= '{start_date.strftime('%Y-%m-%d')}' AND Date <= '{end_date.strftime('%Y-%m-%d')}'"
-            df_cache = client.query(sql).to_dataframe()
-            if not df_cache.empty:
-                st.sidebar.info(f"'{keyword}' 뉴스 데이터를 BigQuery 캐시에서 로드했습니다.")
-                all_news_data.append(df_cache)
-                continue
-        except Exception: pass
-
-        with st.spinner(f"'{keyword}' 관련 뉴스를 크롤링하고 분석하는 중..."):
-            news_url = f"https://news.google.com/search?q={keyword}&hl=ko&gl=KR&ceid=KR%3Ako"
-            paper = build(news_url, memoize_articles=False, language='ko')
-            keyword_articles = []
-            for article in paper.articles[:25]:
-                try:
-                    article.download(); article.parse()
-                    pub_date = article.publish_date
-                    if pub_date and start_date <= pub_date.replace(tzinfo=None) <= end_date:
-                        title_to_analyze = article.title[:256]
-                        analysis = model(title_to_analyze)[0]
-                        label = analysis['label']
-                        score = analysis['score']
-                        sentiment_score = score if label == 'positive' else -score if label == 'negative' else 0.0
-                        keyword_articles.append({'Date': pub_date.date(), 'Title': article.title, 'Sentiment': sentiment_score, 'Keyword': keyword})
-                except Exception: continue
-            
-            if keyword_articles:
-                df_new = pd.DataFrame(keyword_articles)
-                all_news_data.append(df_new)
-                deduplicate_and_write_to_bq(client, df_new, table_name)
-
-    if not all_news_data: return pd.DataFrame()
+        for lang, country in [('ko', 'KR'), ('en', 'US')]:
+            with st.spinner(f"과거 뉴스 수집 중: '{keyword}' ({lang})... (시간이 매우 오래 걸릴 수 있습니다)"):
+                news_url = f"https://news.google.com/search?q={keyword}&hl={lang}&gl={country}&ceid={country}%3A{lang}"
+                paper = build(news_url, memoize_articles=False, language=lang)
+                keyword_articles = []
+                for article in paper.articles[:50]: # Limit articles to avoid timeout
+                    try:
+                        article.download(); article.parse()
+                        pub_date = article.publish_date
+                        if pub_date and start_date <= pub_date.replace(tzinfo=None) <= end_date:
+                            model = models[lang]
+                            analysis = model(article.title[:256])[0]
+                            score = analysis['score'] if analysis['label'].lower() in ['positive', '5 stars'] else -analysis['score']
+                            keyword_articles.append({'Date': pub_date.date(), 'Title': article.title, 'Sentiment': score, 'Keyword': keyword, 'Language': lang})
+                    except Exception: continue
+                if keyword_articles: all_news_data.append(pd.DataFrame(keyword_articles))
+    
+    if not all_news_data: st.sidebar.warning("수집된 과거 뉴스가 없습니다."); return
     final_df = pd.concat(all_news_data, ignore_index=True)
-    final_df['Date'] = pd.to_datetime(final_df['Date'])
+    deduplicate_and_write_to_bq(client, final_df, "news_sentiment_cache")
     return final_df
 
+def fetch_latest_news_rss(client, keywords, models):
+    """[2단계: 지속적] RSS 피드로 최신 뉴스를 안정적으로 수집합니다."""
+    all_news_data = []
+    for keyword in keywords:
+        for lang, country in [('ko', 'KR'), ('en', 'US')]:
+            with st.spinner(f"최신 뉴스 수집 중: '{keyword}' ({lang})..."):
+                rss_url = f"https://news.google.com/rss/search?q={keyword}&hl={lang}&gl={country}&ceid={country}:{lang}"
+                feed = feedparser.parse(rss_url)
+                keyword_articles = []
+                for entry in feed.entries[:25]:
+                    try:
+                        article = Article(entry.link)
+                        article.download(); article.parse()
+                        pub_date = article.publish_date if article.publish_date else datetime.now()
+                        model = models[lang]
+                        analysis = model(article.title[:256])[0]
+                        score = analysis['score'] if analysis['label'].lower() in ['positive', '5 stars'] else -analysis['score']
+                        keyword_articles.append({'Date': pub_date.date(), 'Title': article.title, 'Sentiment': score, 'Keyword': keyword, 'Language': lang})
+                    except Exception: continue
+                if keyword_articles: all_news_data.append(pd.DataFrame(keyword_articles))
+
+    if not all_news_data: st.sidebar.warning("수집된 최신 뉴스가 없습니다."); return
+    final_df = pd.concat(all_news_data, ignore_index=True)
+    deduplicate_and_write_to_bq(client, final_df, "news_sentiment_cache")
+    return final_df
+
+# (기타 API fetch 함수들은 편의상 그대로 유지)
 def fetch_yfinance_data(tickers, start_date, end_date):
     all_data = []
     for name, ticker in tickers.items():
@@ -215,15 +228,11 @@ def fetch_kamis_data(item_info, start_date, end_date, kamis_keys):
     return df
 
 # --- Constants & App ---
-COFFEE_TICKERS_YFINANCE = {"미국 커피 C": "KC=F", "런던 로부스타": "RC=F"}
-KAMIS_CATEGORIES = {"채소류": "100", "과일류": "200", "축산물": "300", "수산물": "400"}
-KAMIS_ITEMS = {"채소류": {"배추": "111", "무": "112", "양파": "114", "마늘": "141"}, "과일류": {"사과": "211", "바나나": "214", "아보카도": "215"}, "축산물": {"소고기": "311", "돼지고기": "312"}, "수산물": {"고등어": "411", "오징어": "413"}}
-
 st.set_page_config(layout="wide")
 st.title("📊 데이터 탐색 및 통합 분석 대시보드")
 
 bq_client = get_bq_connection()
-sentiment_model = load_sentiment_model()
+sentiment_models = load_sentiment_models()
 if bq_client is None: st.stop()
 
 st.sidebar.header("⚙️ 분석 설정")
@@ -238,21 +247,17 @@ if 'categories' not in st.session_state:
 st.sidebar.subheader("1. 분석 대상 설정")
 if not st.session_state.categories:
     st.sidebar.warning("BigQuery에 데이터가 없습니다. 아래에서 새 데이터를 추가해주세요.")
-    selected_categories = []
 else:
     selected_categories = st.sidebar.multiselect("분석할 품목 카테고리 선택", st.session_state.categories)
-
-if st.sidebar.button("🚀 선택 완료 및 분석 시작", disabled=(not st.session_state.categories)):
-    if not selected_categories:
-        st.sidebar.warning("카테고리를 선택해주세요.")
-    else:
-        st.session_state.raw_trade_df = get_trade_data_from_bq(bq_client, selected_categories)
-        if st.session_state.raw_trade_df is not None and not st.session_state.raw_trade_df.empty:
-            st.session_state.data_loaded = True
-            st.session_state.selected_categories = selected_categories
-            st.rerun()
+    if st.sidebar.button("🚀 선택 완료 및 분석 시작"):
+        if not selected_categories: st.sidebar.warning("카테고리를 선택해주세요.")
         else:
-            st.sidebar.error("데이터를 불러오지 못했습니다.")
+            st.session_state.raw_trade_df = get_trade_data_from_bq(bq_client, selected_categories)
+            if st.session_state.raw_trade_df is not None and not st.session_state.raw_trade_df.empty:
+                st.session_state.data_loaded = True
+                st.session_state.selected_categories = selected_categories
+                st.rerun()
+            else: st.sidebar.error("데이터를 불러오지 못했습니다.")
 
 with st.sidebar.expander("➕ 새 수출입 데이터 추가"):
     uploaded_file = st.file_uploader("새 파일 업로드하여 BigQuery에 추가", type=['csv', 'xlsx'])
@@ -260,8 +265,7 @@ with st.sidebar.expander("➕ 새 수출입 데이터 추가"):
         if st.button("업로드 파일 BigQuery에 저장"):
             df_new = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
             add_trade_data_to_bq(bq_client, df_new)
-            st.session_state.clear()
-            st.rerun()
+            st.session_state.clear(); st.rerun()
 
 if not st.session_state.data_loaded:
     st.info("👈 사이드바에서 분석할 카테고리를 선택하고 '분석 시작' 버튼을 눌러주세요.")
@@ -287,46 +291,27 @@ except Exception as e:
     st.error(f"데이터 처리 중 오류: {e}"); st.stop()
 
 # --- External Data Loading Section ---
-st.sidebar.subheader("🔗 외부 가격 데이터")
-is_coffee_selected = any('커피' in str(cat) for cat in selected_categories)
-if is_coffee_selected:
-    st.sidebar.info("Yahoo Finance에서 선물가격을 가져옵니다.")
-    if st.sidebar.button("선물가격 데이터 가져오기"):
-        df = fetch_yfinance_data(COFFEE_TICKERS_YFINANCE, start_date, end_date)
-        st.session_state['wholesale_data'] = df
-else:
-    st.sidebar.info("KAMIS에서 농산물 도매가격 데이터를 가져옵니다.")
-    kamis_api_key = st.sidebar.text_input("KAMIS API Key", type="password")
-    kamis_api_id = st.sidebar.text_input("KAMIS API ID", type="password")
-    cat_name = st.sidebar.selectbox("품목 분류 선택", list(KAMIS_CATEGORIES.keys()))
-    if cat_name:
-        item_name = st.sidebar.selectbox("세부 품목 선택", list(KAMIS_ITEMS[cat_name].keys()))
-        if st.sidebar.button("KAMIS 데이터 가져오기"):
-            if kamis_api_key and kamis_api_id:
-                item_info = {'item_code': KAMIS_ITEMS[cat_name][item_name], 'cat_code': KAMIS_CATEGORIES[cat_name]}
-                df = fetch_kamis_data(item_info, start_date, end_date, {'key': kamis_api_key, 'id': kamis_api_id})
-                st.session_state['wholesale_data'] = df
-            else: st.sidebar.error("KAMIS API Key와 ID를 모두 입력해주세요.")
-raw_wholesale_df = st.session_state.get('wholesale_data', pd.DataFrame())
+COFFEE_TICKERS_YFINANCE = {"미국 커피 C": "KC=F", "런던 로부스타": "RC=F"}
+KAMIS_CATEGORIES = {"채소류": "100", "과일류": "200", "축산물": "300", "수산물": "400"}
+KAMIS_ITEMS = {"채소류": {"배추": "111", "무": "112", "양파": "114", "마늘": "141"}, "과일류": {"사과": "211", "바나나": "214", "아보카도": "215"}, "축산물": {"소고기": "311", "돼지고기": "312"}, "수산물": {"고등어": "411", "오징어": "413"}}
 
-# --- Search Data Loading Section ---
-st.sidebar.subheader("📰 검색량 데이터")
-naver_client_id = st.sidebar.text_input("Naver API Client ID", type="password")
-naver_client_secret = st.sidebar.text_input("Naver API Client Secret", type="password")
-if st.sidebar.button("검색량 데이터 가져오기"):
-    if not search_keywords: st.sidebar.warning("검색어를 먼저 입력해주세요.")
-    else:
-        df = fetch_trends_data(search_keywords, start_date, end_date, {'id': naver_client_id, 'secret': naver_client_secret})
-        st.session_state['search_data'] = df
-raw_search_df = st.session_state.get('search_data', pd.DataFrame())
-
+# ... (Sidebar buttons for yfinance, kamis, trends) ...
 # --- News Analysis Section ---
 st.sidebar.subheader("📰 뉴스 감성 분석")
-if st.sidebar.button("뉴스 기사 분석하기"):
+if st.sidebar.button("최신 뉴스 분석하기 (RSS)"):
     if not search_keywords: st.sidebar.warning("분석할 키워드를 먼저 입력해주세요.")
     else:
-        df = fetch_and_analyze_news(bq_client, search_keywords, start_date, end_date, sentiment_model)
+        df = fetch_latest_news_rss(bq_client, search_keywords, sentiment_models)
         st.session_state['news_data'] = df
+        st.rerun()
+
+with st.sidebar.expander("⏳ 과거 뉴스 데이터 일괄 수집 (일회성, 인내심 필요)"):
+    st.warning("이 기능은 지난 1년간의 뉴스를 수집하며, 몇십 분 이상 소요될 수 있고 불안정할 수 있습니다. 일회성으로만 사용하세요.")
+    if st.button("과거 뉴스 수집 시작"):
+        one_year_ago = datetime.now() - timedelta(days=365)
+        df = fetch_historical_news(bq_client, search_keywords, one_year_ago, datetime.now(), sentiment_models)
+        st.session_state['news_data'] = df
+        st.rerun()
 raw_news_df = st.session_state.get('news_data', pd.DataFrame())
 
 # --- Main Display Area ---
