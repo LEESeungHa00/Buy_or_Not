@@ -112,29 +112,22 @@ def fetch_and_analyze_news(client, keywords, start_date, end_date, model):
                 st.sidebar.info(f"'{keyword}' 뉴스 데이터를 BigQuery 캐시에서 로드했습니다.")
                 all_news_data.append(df_cache)
                 continue
-        except Exception: pass # Cache table might not exist yet
+        except Exception: pass
 
         with st.spinner(f"'{keyword}' 관련 뉴스를 크롤링하고 분석하는 중..."):
             news_url = f"https://news.google.com/search?q={keyword}&hl=ko&gl=KR&ceid=KR%3Ako"
             paper = build(news_url, memoize_articles=False, language='ko')
             keyword_articles = []
-            for article in paper.articles[:25]: # Limit articles for speed
+            for article in paper.articles[:25]:
                 try:
                     article.download(); article.parse()
                     pub_date = article.publish_date
                     if pub_date and start_date <= pub_date.replace(tzinfo=None) <= end_date:
                         title_to_analyze = article.title[:256]
                         analysis = model(title_to_analyze)[0]
-                        
                         label = analysis['label']
                         score = analysis['score']
-                        if label == 'positive':
-                            sentiment_score = score
-                        elif label == 'negative':
-                            sentiment_score = -score
-                        else: # neutral
-                            sentiment_score = 0.0
-                        
+                        sentiment_score = score if label == 'positive' else -score if label == 'negative' else 0.0
                         keyword_articles.append({'Date': pub_date.date(), 'Title': article.title, 'Sentiment': sentiment_score, 'Keyword': keyword})
                 except Exception: continue
             
@@ -217,12 +210,7 @@ def fetch_kamis_data(item_info, start_date, end_date, kamis_keys):
     df = pd.DataFrame(all_data)
     return df
 
-# --- [FIX] Constants defined before they are used by the app ---
-COFFEE_TICKERS_YFINANCE = {"미국 커피 C": "KC=F", "런던 로부스타": "RC=F"}
-KAMIS_CATEGORIES = {"채소류": "100", "과일류": "200", "축산물": "300", "수산물": "400"}
-KAMIS_ITEMS = {"채소류": {"배추": "111", "무": "112", "양파": "114", "마늘": "141"}, "과일류": {"사과": "211", "바나나": "214", "아보카도": "215"}, "축산물": {"소고기": "311", "돼지고기": "312"}, "수산물": {"고등어": "411", "오징어": "413"}}
-
-# --- Streamlit App ---
+# --- Constants & App ---
 st.set_page_config(layout="wide")
 st.title("📊 데이터 탐색 및 통합 분석 대시보드")
 
@@ -235,35 +223,44 @@ st.sidebar.header("⚙️ 분석 설정")
 # --- App Startup Workflow ---
 if 'data_loaded' not in st.session_state:
     st.session_state.data_loaded = False
+
+if 'categories' not in st.session_state:
     st.session_state.categories = get_categories_from_bq(bq_client)
 
+# --- [FIX START] Always show analysis UI and data adding option ---
+st.sidebar.subheader("1. 분석 대상 설정")
 if not st.session_state.categories:
-    st.info("BigQuery에 분석할 데이터가 없습니다. 먼저 데이터를 추가해주세요.")
-    st.sidebar.subheader("새 수출입 데이터 추가")
-    uploaded_file = st.sidebar.file_uploader("새 파일 업로드하여 BigQuery에 추가", type=['csv', 'xlsx'])
+    st.sidebar.warning("BigQuery에 데이터가 없습니다. 아래에서 새 데이터를 추가해주세요.")
+    selected_categories = []
+else:
+    selected_categories = st.sidebar.multiselect("분석할 품목 카테고리 선택", st.session_state.categories)
+
+if st.sidebar.button("🚀 선택 완료 및 분석 시작", disabled=(not st.session_state.categories)):
+    if not selected_categories:
+        st.sidebar.warning("카테고리를 선택해주세요.")
+    else:
+        st.session_state.raw_trade_df = get_trade_data_from_bq(bq_client, selected_categories)
+        if st.session_state.raw_trade_df is not None and not st.session_state.raw_trade_df.empty:
+            st.session_state.data_loaded = True
+            st.session_state.selected_categories = selected_categories
+            st.rerun()
+        else:
+            st.sidebar.error("데이터를 불러오지 못했습니다.")
+
+# Always available expander for adding new data
+with st.sidebar.expander("➕ 새 수출입 데이터 추가"):
+    uploaded_file = st.file_uploader("새 파일 업로드하여 BigQuery에 추가", type=['csv', 'xlsx'])
     if uploaded_file:
-        if st.sidebar.button("업로드 파일 BigQuery에 저장"):
+        if st.button("업로드 파일 BigQuery에 저장"):
             df_new = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
             add_trade_data_to_bq(bq_client, df_new)
             st.session_state.clear()
             st.rerun()
-    st.stop()
+# --- [FIX END] ---
 
 if not st.session_state.data_loaded:
-    st.sidebar.subheader("1. 분석 대상 설정")
-    selected_categories = st.sidebar.multiselect("분석할 품목 카테고리 선택", st.session_state.categories)
-    if st.sidebar.button("🚀 선택 완료 및 분석 시작"):
-        if not selected_categories: st.sidebar.warning("카테고리를 선택해주세요.")
-        else:
-            st.session_state.raw_trade_df = get_trade_data_from_bq(bq_client, selected_categories)
-            if st.session_state.raw_trade_df is not None and not st.session_state.raw_trade_df.empty:
-                st.session_state.data_loaded = True
-                st.session_state.selected_categories = selected_categories
-                st.rerun()
-            else: st.sidebar.error("데이터를 불러오지 못했습니다.")
-    else:
-        st.info("👈 사이드바에서 분석할 카테고리를 선택하고 '분석 시작' 버튼을 눌러주세요.")
-        st.stop()
+    st.info("👈 사이드바에서 분석할 카테고리를 선택하고 '분석 시작' 버튼을 눌러주세요.")
+    st.stop()
 
 # --- Analysis UI ---
 raw_trade_df = st.session_state.raw_trade_df
@@ -285,6 +282,10 @@ except Exception as e:
     st.error(f"데이터 처리 중 오류: {e}"); st.stop()
 
 # --- External Data Loading Section ---
+COFFEE_TICKERS_YFINANCE = {"미국 커피 C": "KC=F", "런던 로부스타": "RC=F"}
+KAMIS_CATEGORIES = {"채소류": "100", "과일류": "200", "축산물": "300", "수산물": "400"}
+KAMIS_ITEMS = {"채소류": {"배추": "111", "무": "112", "양파": "114", "마늘": "141"}, "과일류": {"사과": "211", "바나나": "214", "아보카도": "215"}, "축산물": {"소고기": "311", "돼지고기": "312"}, "수산물": {"고등어": "411", "오징어": "413"}}
+
 st.sidebar.subheader("🔗 외부 가격 데이터")
 is_coffee_selected = any('커피' in str(cat) for cat in selected_categories)
 if is_coffee_selected:
@@ -395,7 +396,7 @@ with tab4:
 
     if not trade_weekly.empty:
         dfs_to_concat = [df for df in [trade_weekly, wholesale_weekly, search_weekly, news_weekly] if not df.empty]
-        final_df = reduce(lambda left, right: pd.merge(left, right, left_index=True, right_index=True, how='outer'), dfs_to_concat)
+        final_df = pd.concat(dfs_to_concat, axis=1)
         final_df = final_df.interpolate(method='linear', limit_direction='forward').dropna(how='all')
         
         st.subheader("최종 통합 데이터셋"); st.dataframe(final_df)
