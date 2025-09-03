@@ -299,13 +299,20 @@ with st.sidebar.expander("➕ 새 수출입 데이터 추가"):
             numeric_cols = ['Value', 'Volume', 'Unit_Price', 'UnitPrice']
             for col in numeric_cols:
                 if col in df_new.columns:
+                    # 빈 문자열이나 하이픈을 NaN으로 변환 후 숫자 타입으로 변경
                     df_new[col] = df_new[col].astype(str).str.replace(',', '').replace('-', np.nan)
                     df_new[col] = pd.to_numeric(df_new[col], errors='coerce')
-            if 'Date' in df_new.columns: df_new['Date'] = pd.to_datetime(df_new['Date'], errors='coerce')
+            if 'Date' in df_new.columns:
+                df_new['Date'] = pd.to_datetime(df_new['Date'], errors='coerce')
+            
             add_trade_data_to_bq(bq_client, df_new)
-            # [수정] st.rerun() 제거 및 세션 상태 초기화
+            
+            # 세션 상태를 초기화하고 성공 메시지를 표시
             st.session_state.clear()
             st.success("데이터가 추가되었습니다. 페이지를 새로고침하여 분석을 다시 시작하세요.")
+
+        except Exception as e:
+            st.error(f"파일 처리 중 오류: {e}")
 
 if not st.session_state.data_loaded:
     st.info("👈 사이드바에서 분석할 카테고리를 선택하고 '분석 시작' 버튼을 눌러주세요."); st.stop()
