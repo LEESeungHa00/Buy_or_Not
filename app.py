@@ -122,7 +122,6 @@ def fetch_historical_news(client, keywords, start_date, end_date, models):
                         article.download(); article.parse()
                         pub_date = article.publish_date
                         if pub_date:
-                            # --- [FIX] 날짜 형식을 pd.Timestamp로 통일하여 비교 ---
                             pub_date_ts = pd.to_datetime(pub_date).tz_localize(None)
                             if start_date <= pub_date_ts <= end_date:
                                 model = models[lang]
@@ -392,6 +391,8 @@ with tab2:
 
         news_weekly = pd.DataFrame()
         if not raw_news_df.empty:
+            # --- [FIX] Ensure Date column is datetime before filtering ---
+            raw_news_df['Date'] = pd.to_datetime(raw_news_df['Date'])
             news_df_in_range = raw_news_df[(raw_news_df['Date'] >= start_date) & (raw_news_df['Date'] <= end_date)]
             if not news_df_in_range.empty:
                 news_weekly = news_df_in_range.set_index('Date').resample('W-Mon').agg(뉴스감성점수=('Sentiment', 'mean')).copy()
