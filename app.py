@@ -401,10 +401,12 @@ with tab4:
         st.session_state['final_df'] = final_df # Save for next tab
         
         st.subheader("통합 데이터 시각화")
-        df_to_plot = final_df.reset_index().rename(columns={'index': '날짜'})
-        fig = px.line(df_to_plot, x='날짜', y=df_to_plot.columns[1:],
-                      labels={'value': '값', 'variable': '데이터 종류'}, title="최종 통합 데이터 시계열 추이")
-        st.plotly_chart(fig, use_container_width=True)
+        if not final_df.empty:
+            df_to_plot = final_df.reset_index().rename(columns={'index': '날짜'})
+            df_long = df_to_plot.melt(id_vars='날짜', var_name='데이터 종류', value_name='값')
+            fig = px.line(df_long, x='날짜', y='값', color='데이터 종류', 
+                          labels={'값': '값', '날짜': '날짜'}, title="최종 통합 데이터 시계열 추이")
+            st.plotly_chart(fig, use_container_width=True)
 
         if len(final_df.columns) > 1:
             st.markdown("---"); st.subheader("상관관계 분석")
