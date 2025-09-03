@@ -59,23 +59,11 @@ def explain_sentiment(model, tokenizer, text, lang):
     token_reference = TokenReferenceBase(reference_token_idx=tokenizer.pad_token_id)
     embeddings = model.base_model.embeddings if hasattr(model.base_model, 'embeddings') else model.distilbert.embeddings
     lig = LayerIntegratedGradients(model, embeddings)
-    
     target_id = model.config.label2id.get('positive', 1) if lang == 'ko' else model.config.label2id.get('POSITIVE', 1)
-    
-    attributions, _ = lig.attribute(inputs['input_ids'], 
-                                   reference_inputs=token_reference.generate_reference(len(inputs['input_ids'][0]), device='cpu'), 
-                                   target=target_id, 
-                                   return_convergence_delta=True)
-    
-    attributions = attributions.sum(dim=-1).squeeze(0)
-    attributions = attributions / torch.norm(attributions)
-    
+    attributions, _ = lig.attribute(inputs['input_ids'], reference_inputs=token_reference.generate_reference(len(inputs['input_ids'][0]), device='cpu'), target=target_id, return_convergence_delta=True)
+    attributions = attributions.sum(dim=-1).squeeze(0) / torch.norm(attributions)
     tokens = tokenizer.convert_ids_to_tokens(inputs['input_ids'][0])
-    word_attributions = []
-    for token, attr in zip(tokens, attributions):
-        if token not in [tokenizer.cls_token, tokenizer.sep_token, tokenizer.pad_token]:
-            word_attributions.append((token.replace('##', ''), attr.item()))
-            
+    word_attributions = [(token.replace('##', ''), attr.item()) for token, attr in zip(tokens, attributions) if token not in [tokenizer.cls_token, tokenizer.sep_token, tokenizer.pad_token]]
     return json.dumps(word_attributions, ensure_ascii=False)
 
 # --- Data Fetching & Processing Functions ---
@@ -121,8 +109,7 @@ def deduplicate_and_write_to_bq(client, df_new, table_name, subset_cols=None):
         with st.spinner(f"중복을 제거한 데이터를 BigQuery '{table_name}'에 저장하는 중..."):
             pandas_gbq.to_gbq(df_deduplicated, table_id, project_id=project_id, if_exists="replace", credentials=client._credentials)
         st.sidebar.success(f"데이터가 BigQuery '{table_name}'에 업데이트되었습니다.")
-    except Exception as e:
-        st.error(f"BigQuery 저장 중 오류 발생: {e}")
+    except Exception as e: st.error(f"BigQuery 저장 중 오류 발생: {e}")
 
 def add_trade_data_to_bq(client, df):
     if isinstance(df.columns, pd.MultiIndex):
@@ -290,8 +277,7 @@ if not st.session_state.data_loaded:
     st.info("👈 사이드바에서 분석할 카테고리를 선택하고 '분석 시작' 버튼을 눌러주세요."); st.stop()
 
 # --- Analysis UI ---
-raw_trade_df = st.session_state.raw_trade_df
-selected_categories = st.session_state.selected_categories
+raw_trade_df = st.session_state.raw_trade_df; selected_categories = st.session_state.selected_categories
 st.sidebar.success(f"**{', '.join(selected_categories)}** 데이터 로드 완료!"); st.sidebar.markdown("---")
 try:
     file_start_date, file_end_date = raw_trade_df['Date'].min(), raw_trade_df['Date'].max()
@@ -310,25 +296,29 @@ raw_news_df = st.session_state.get('news_data', pd.DataFrame())
 
 st.sidebar.subheader("🔗 외부 데이터 연동")
 is_coffee_selected = any('커피' in str(cat) for cat in selected_categories)
-if is_coffee_selected and st.sidebar.button("선물가격 데이터 가져오기"):
-    st.session_state.wholesale_data = fetch_yfinance_data(COFFEE_TICKERS_YFINANCE, start_date, end_date); st.rerun()
-elif not is_coffee_selected:
+if is_coffee_selected:
+    if st.sidebar.button("선물가격 데이터 가져오기"):
+        st.session_state.wholesale_data = fetch_yfinance_data(COFFEE_TICKERS_YFINANCE, start_date, end_date); st.rerun()
+else:
+    st.sidebar.markdown("##### KAMIS 농산물 가격")
     kamis_api_key = st.sidebar.text_input("KAMIS API Key", type="password")
     kamis_api_id = st.sidebar.text_input("KAMIS API ID", type="password")
-    cat_name = st.sidebar.selectbox("품목 분류 선택", list(KAMIS_CATEGORIES.keys()))
+    cat_name = st.sidebar.selectbox("품목 분류", list(KAMIS_CATEGORIES.keys()))
     if cat_name:
-        item_name = st.sidebar.selectbox("세부 품목 선택", list(KAMIS_ITEMS[cat_name].keys()))
+        item_name = st.sidebar.selectbox("세부 품목", list(KAMIS_ITEMS[cat_name].keys()))
         if st.sidebar.button("KAMIS 데이터 가져오기"):
             if kamis_api_key and kamis_api_id:
                 item_info = {'item_name': item_name, 'item_code': KAMIS_ITEMS[cat_name][item_name], 'cat_code': KAMIS_CATEGORIES[cat_name]}
                 st.session_state.wholesale_data = fetch_kamis_data(bq_client, item_info, start_date, end_date, {'key': kamis_api_key, 'id': kamis_api_id}); st.rerun()
             else: st.sidebar.error("KAMIS API Key와 ID를 모두 입력해주세요.")
+st.sidebar.markdown("##### 트렌드 데이터")
+naver_client_id = st.sidebar.text_input("Naver API Client ID", type="password")
+naver_client_secret = st.sidebar.text_input("Naver API Client Secret", type="password")
 if st.sidebar.button("트렌드 데이터 가져오기"):
-    naver_client_id = st.sidebar.text_input("Naver API Client ID", type="password")
-    naver_client_secret = st.sidebar.text_input("Naver API Client Secret", type="password")
     if not search_keywords: st.sidebar.warning("검색어를 먼저 입력해주세요.")
     else:
         st.session_state.search_data = fetch_trends_data(search_keywords, start_date, end_date, {'id': naver_client_id, 'secret': naver_client_secret}); st.rerun()
+st.sidebar.markdown("##### 뉴스 감성 분석")
 if st.sidebar.button("최신 뉴스 분석하기 (RSS)"):
     if not search_keywords: st.sidebar.warning("분석할 키워드를 먼저 입력해주세요.")
     else:
@@ -346,7 +336,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(tab_list)
 with tab1:
     st.subheader("A. 수출입 데이터"); st.dataframe(raw_trade_df.head())
     st.subheader("B. 외부 가격 데이터"); st.dataframe(raw_wholesale_df.head())
-    st.subheader("C. 검색량 데이터"); st.dataframe(raw_search_df.head())
+    st.subheader("C. 트렌드 데이터"); st.dataframe(raw_search_df.head())
     st.subheader("D. 뉴스 데이터"); st.dataframe(raw_news_df.head())
 
 with tab2:
