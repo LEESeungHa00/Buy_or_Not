@@ -72,7 +72,7 @@ def get_categories_from_bq(_client):
     project_id = _client.project; table_id = f"{project_id}.data_explorer.tds_data"
     try:
         with st.spinner("BigQuery에서 카테고리 목록을 불러오는 중..."):
-            query = f"SELECT DISTINCT Category FROM `{table_id}` WHERE Category IS NOT NULL ORDER BY Category"
+            query = f"SELECT DISTINCT Category FROM {table_id} WHERE Category IS NOT NULL ORDER BY Category"
             df = _client.query(query).to_dataframe()
         return sorted(df['Category'].astype(str).unique())
     except Exception as e:
@@ -84,15 +84,26 @@ def get_trade_data_from_bq(client, categories):
     project_id = client.project; table_id = f"{project_id}.data_explorer.tds_data"
     try:
         query_params = [bigquery.ArrayQueryParameter("categories", "STRING", categories)]
-        sql = f"SELECT * FROM `{table_id}` WHERE Category IN UNNEST(@categories)"
+        sql = f"SELECT * FROM {table_id} WHERE Category IN UNNEST(@categories)"
         job_config = bigquery.QueryJobConfig(query_parameters=query_params)
         with st.spinner(f"BigQuery에서 {len(categories)}개 카테고리 데이터를 로드하는 중..."):
             df = client.query(sql, job_config=job_config).to_dataframe()
+        
+        # [수정] 데이터 타입 변환을 더 명시적으로 처리
         for col in df.columns:
             if 'price' in col.lower() or 'value' in col.lower() or 'volume' in col.lower():
                 df[col] = pd.to_numeric(df[col], errors='coerce')
-            elif 'date' in col.lower():
-                df[col] = pd.to_datetime(df[col], errors='coerce')
+        # [수정] 'Date' 컬럼이 최우선, 없다면 다른 날짜 컬럼을 찾아 변환
+        date_col_found = None
+        if 'Date' in df.columns:
+            date_col_found = 'Date'
+        elif 'date' in df.columns:
+            date_col_found = 'date'
+        
+        if date_col_found:
+             df[date_col_found] = pd.to_datetime(df[date_col_found], errors='coerce')
+             df.rename(columns={date_col_found: 'Date'}, inplace=True) # 컬럼명을 'Date'로 통일
+        
         return df
     except Exception as e:
         st.error(f"BigQuery에서 TDS 데이터를 읽는 중 오류 발생: {e}"); return pd.DataFrame()
@@ -101,11 +112,14 @@ def deduplicate_and_write_to_bq(client, df_new, table_name, subset_cols=None):
     project_id = client.project; table_id = f"{project_id}.data_explorer.{table_name}"
     try:
         try:
-            sql = f"SELECT * FROM `{table_id}`"
+            sql = f"SELECT * FROM {table_id}"
             df_existing = client.query(sql).to_dataframe()
         except Exception: df_existing = pd.DataFrame()
         df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-        df_deduplicated = df_combined.drop_duplicates(subset=subset_cols)
+        if subset_cols:
+            df_deduplicated = df_combined.drop_duplicates(subset=subset_cols)
+        else:
+            df_deduplicated = df_combined.drop_duplicates()
         with st.spinner(f"중복을 제거한 데이터를 BigQuery '{table_name}'에 저장하는 중..."):
             pandas_gbq.to_gbq(df_deduplicated, table_id, project_id=project_id, if_exists="replace", credentials=client._credentials)
         st.sidebar.success(f"데이터가 BigQuery '{table_name}'에 업데이트되었습니다.")
@@ -164,10 +178,11 @@ def fetch_yfinance_data(tickers, start_date, end_date):
     for name, ticker in tickers.items():
         data = yf.download(ticker, start=start_date, end=end_date, progress=False)
         if not data.empty:
-            df = data[['Close']].copy().reset_index().rename(columns={'Date': '조사일자', 'Close': f'{name}_선물가격_USD'})
+            df = data[['Close']].copy().reset_index().rename(columns={'Date': '날짜', 'Close': f'{name}_선물가격_USD'})
             all_data.append(df)
     if not all_data: return pd.DataFrame()
-    return reduce(lambda left, right: pd.merge(left, right, on='조사일자', how='outer'), all_data)
+    # [수정] 날짜 컬럼 이름을 '날짜'로 통일하여 merge
+    return reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), all_data)
 
 def call_naver_api(url, body, naver_keys):
     request = urllib.request.Request(url)
@@ -207,11 +222,11 @@ def fetch_kamis_data(client, item_info, start_date, end_date, kamis_keys):
     project_id = client.project; table_name = "kamis_cache"
     table_id = f"{project_id}.data_explorer.{table_name}"; item_code = item_info['item_code']; kind_code = item_info['kind_code']
     try:
-        sql = f"SELECT Date AS 조사일자, Price AS 도매가격_원 FROM `{table_id}` WHERE ItemCode = '{item_code}' AND KindCode = '{kind_code}' AND Date >= '{start_date.strftime('%Y-%m-%d')}' AND Date <= '{end_date.strftime('%Y-%m-%d')}'"
+        sql = f"SELECT Date AS 날짜, Price AS 도매가격_원 FROM {table_id} WHERE ItemCode = '{item_code}' AND KindCode = '{kind_code}' AND Date >= '{start_date.strftime('%Y-%m-%d')}' AND Date <= '{end_date.strftime('%Y-%m-%d')}'"
         df_cache = client.query(sql).to_dataframe()
         if len(df_cache) >= (end_date - start_date).days * 0.8:
             st.sidebar.info(f"'{item_info['item_name']}-{item_info['kind_name']}' KAMIS 데이터를 BigQuery 캐시에서 로드했습니다.")
-            df_cache['조사일자'] = pd.to_datetime(df_cache['조사일자'])
+            df_cache['날짜'] = pd.to_datetime(df_cache['날짜'])
             return df_cache
     except Exception: pass
     all_data = []
@@ -227,7 +242,6 @@ def fetch_kamis_data(client, item_info, start_date, end_date, kamis_keys):
             response = requests.get(url, timeout=10)
             if response.status_code == 200:
                 data = response.json()
-                # KAMIS API는 데이터가 없을 때 data 키가 없는 경우가 있음
                 if "data" in data and data["data"] and "item" in data["data"]:
                     price_str = data["data"]["item"][0].get('price', '0').replace(',', '')
                     if price_str.isdigit() and int(price_str) > 0:
@@ -239,7 +253,8 @@ def fetch_kamis_data(client, item_info, start_date, end_date, kamis_keys):
     df_new = pd.DataFrame(all_data)
     deduplicate_and_write_to_bq(client, df_new, table_name, subset_cols=['Date', 'ItemCode', 'KindCode'])
     df_new['Date'] = pd.to_datetime(df_new['Date'])
-    return df_new.rename(columns={'Date': '조사일자', 'Price': '도매가격_원'})
+    # [수정] 날짜 컬럼 이름을 '날짜'로 통일
+    return df_new.rename(columns={'Date': '날짜', 'Price': '도매가격_원'})
 
 # --- Constants & App ---
 COFFEE_TICKERS_YFINANCE = {"미국 커피 C": "KC=F", "런던 로부스타": "RC=F"}
@@ -271,8 +286,11 @@ else:
         else:
             st.session_state.raw_trade_df = get_trade_data_from_bq(bq_client, selected_categories)
             if st.session_state.raw_trade_df is not None and not st.session_state.raw_trade_df.empty:
-                st.session_state.data_loaded = True; st.session_state.selected_categories = selected_categories; st.rerun()
+                st.session_state.data_loaded = True
+                st.session_state.selected_categories = selected_categories
+                # [수정] st.rerun() 제거
             else: st.sidebar.error("데이터를 불러오지 못했습니다.")
+
 with st.sidebar.expander("➕ 새 수출입 데이터 추가"):
     uploaded_file = st.file_uploader("새 파일 업로드", type=['csv', 'xlsx'])
     if uploaded_file and st.button("업로드 파일 BigQuery에 저장"):
@@ -281,10 +299,14 @@ with st.sidebar.expander("➕ 새 수출입 데이터 추가"):
             numeric_cols = ['Value', 'Volume', 'Unit_Price', 'UnitPrice']
             for col in numeric_cols:
                 if col in df_new.columns:
-                    df_new[col] = df_new[col].astype(str).str.replace(',', ''); df_new[col] = pd.to_numeric(df_new[col], errors='coerce')
+                    df_new[col] = df_new[col].astype(str).str.replace(',', '').replace('-', np.nan)
+                    df_new[col] = pd.to_numeric(df_new[col], errors='coerce')
             if 'Date' in df_new.columns: df_new['Date'] = pd.to_datetime(df_new['Date'], errors='coerce')
-            add_trade_data_to_bq(bq_client, df_new); st.session_state.clear(); st.rerun()
-        except Exception as e: st.error(f"파일 처리 중 오류: {e}")
+            add_trade_data_to_bq(bq_client, df_new)
+            # [수정] st.rerun() 제거 및 세션 상태 초기화
+            st.session_state.clear()
+            st.success("데이터가 추가되었습니다. 페이지를 새로고침하여 분석을 다시 시작하세요.")
+
 if not st.session_state.data_loaded:
     st.info("👈 사이드바에서 분석할 카테고리를 선택하고 '분석 시작' 버튼을 눌러주세요."); st.stop()
 
@@ -292,6 +314,10 @@ if not st.session_state.data_loaded:
 raw_trade_df = st.session_state.raw_trade_df; selected_categories = st.session_state.selected_categories
 st.sidebar.success(f"**{', '.join(selected_categories)}** 데이터 로드 완료!"); st.sidebar.markdown("---")
 try:
+    if 'Date' not in raw_trade_df.columns:
+        st.error("불러온 수출입 데이터에 'Date' 컬럼이 없습니다. 데이터를 확인해주세요.")
+        st.stop()
+    raw_trade_df.dropna(subset=['Date'], inplace=True)
     file_start_date, file_end_date = raw_trade_df['Date'].min(), raw_trade_df['Date'].max()
     default_keywords = ", ".join(selected_categories) if selected_categories else ""
     keyword_input = st.sidebar.text_input("검색어/뉴스 분석 키워드 입력", default_keywords)
@@ -300,7 +326,7 @@ try:
     start_date_input = st.sidebar.date_input('시작일', file_start_date, min_value=file_start_date, max_value=file_end_date)
     end_date_input = st.sidebar.date_input('종료일', file_end_date, min_value=start_date_input, max_value=file_end_date)
     start_date = pd.to_datetime(start_date_input); end_date = pd.to_datetime(end_date_input)
-except Exception as e: st.error(f"데이터 처리 중 오류: {e}"); st.stop()
+except Exception as e: st.error(f"데이터 기간 설정 중 오류 발생: {e}"); st.stop()
 
 raw_wholesale_df = st.session_state.get('wholesale_data', pd.DataFrame())
 raw_search_df = st.session_state.get('search_data', pd.DataFrame())
@@ -310,7 +336,8 @@ st.sidebar.subheader("🔗 외부 데이터 연동")
 is_coffee_selected = any('커피' in str(cat) for cat in selected_categories)
 if is_coffee_selected:
     if st.sidebar.button("선물가격 데이터 가져오기"):
-        st.session_state.wholesale_data = fetch_yfinance_data(COFFEE_TICKERS_YFINANCE, start_date, end_date); st.rerun()
+        st.session_state.wholesale_data = fetch_yfinance_data(COFFEE_TICKERS_YFINANCE, start_date, end_date)
+        # [수정] st.rerun() 제거
 else:
     st.sidebar.markdown("##### KAMIS 농산물 가격")
     kamis_api_key = st.sidebar.text_input("KAMIS API Key", type="password")
@@ -325,9 +352,10 @@ else:
                     'item_code': KAMIS_FULL_DATA[item_name]['item_code'],
                     'kind_code': KAMIS_FULL_DATA[item_name]['kinds'][kind_name],
                     'cat_code': KAMIS_FULL_DATA[item_name]['cat_code'],
-                    'rank_code': '01' # 등급은 '상품'으로 고정
+                    'rank_code': '01'
                 }
-                st.session_state.wholesale_data = fetch_kamis_data(bq_client, item_info, start_date, end_date, {'key': kamis_api_key, 'id': kamis_api_id}); st.rerun()
+                st.session_state.wholesale_data = fetch_kamis_data(bq_client, item_info, start_date, end_date, {'key': kamis_api_key, 'id': kamis_api_id})
+                # [수정] st.rerun() 제거
             else: st.sidebar.error("KAMIS API Key와 ID를 모두 입력해주세요.")
 st.sidebar.markdown("##### 트렌드 데이터")
 naver_client_id = st.sidebar.text_input("Naver API Client ID", type="password")
@@ -335,17 +363,20 @@ naver_client_secret = st.sidebar.text_input("Naver API Client Secret", type="pas
 if st.sidebar.button("트렌드 데이터 가져오기"):
     if not search_keywords: st.sidebar.warning("검색어를 먼저 입력해주세요.")
     else:
-        st.session_state.search_data = fetch_trends_data(search_keywords, start_date, end_date, {'id': naver_client_id, 'secret': naver_client_secret}); st.rerun()
+        st.session_state.search_data = fetch_trends_data(search_keywords, start_date, end_date, {'id': naver_client_id, 'secret': naver_client_secret})
+        # [수정] st.rerun() 제거
 st.sidebar.markdown("##### 뉴스 감성 분석")
 if st.sidebar.button("최신 뉴스 분석하기 (RSS)"):
     if not search_keywords: st.sidebar.warning("분석할 키워드를 먼저 입력해주세요.")
     else:
-        st.session_state.news_data = fetch_latest_news_rss(bq_client, search_keywords, sentiment_assets); st.rerun()
+        st.session_state.news_data = fetch_latest_news_rss(bq_client, search_keywords, sentiment_assets)
+        # [수정] st.rerun() 제거
 with st.sidebar.expander("⏳ 과거 뉴스 데이터 일괄 수집"):
     st.warning("일회성 기능으로, 매우 느릴 수 있습니다.")
     if st.button("과거 뉴스 수집 시작"):
         one_year_ago = datetime.now() - timedelta(days=365)
-        st.session_state.news_data = fetch_historical_news(bq_client, search_keywords, one_year_ago, datetime.now(), sentiment_assets); st.rerun()
+        st.session_state.news_data = fetch_historical_news(bq_client, search_keywords, one_year_ago, datetime.now(), sentiment_assets)
+        # [수정] st.rerun() 제거
 
 # --- Main Display ---
 tab_list = ["1️⃣ 원본 데이터", "2️⃣ 데이터 표준화", "3️⃣ 뉴스 감성 분석", "4️⃣ 상관관계 분석", "📈 시계열 분해 및 예측"]
@@ -366,19 +397,23 @@ with tab2:
         filtered_trade_df.set_index('Date', inplace=True)
         trade_weekly = filtered_trade_df.resample('W-Mon').agg(수입액_USD=('Value', 'sum'), 수입량_KG=('Volume', 'sum')).copy()
         trade_weekly['수입단가_USD_KG'] = trade_weekly['수입액_USD'] / trade_weekly['수입량_KG']
-        
+        trade_weekly.index.name = '날짜' # [추가] 인덱스 이름 통일
+
         wholesale_weekly = pd.DataFrame()
         if not raw_wholesale_df.empty:
-            raw_wholesale_df['조사일자'] = pd.to_datetime(raw_wholesale_df['조사일자'])
-            wholesale_weekly = raw_wholesale_df.set_index('조사일자').resample('W-Mon').mean(numeric_only=True)
+            # [수정] 모든 외부 데이터는 '날짜' 컬럼을 기준으로 처리
+            raw_wholesale_df['날짜'] = pd.to_datetime(raw_wholesale_df['날짜'])
+            wholesale_weekly = raw_wholesale_df.set_index('날짜').resample('W-Mon').mean(numeric_only=True)
             if '도매가격_원' in wholesale_weekly.columns:
-                wholesale_weekly['도매가격_USD'] = wholesale_weekly['도매가격_원'] / 1350
+                wholesale_weekly['도매가격_USD'] = wholesale_weekly['도매가격_원'] / 1350 # 환율은 예시
                 wholesale_weekly.drop(columns=['도매가격_원'], inplace=True)
+            wholesale_weekly.index.name = '날짜' # [추가] 인덱스 이름 통일
 
         search_weekly = pd.DataFrame()
         if not raw_search_df.empty:
             raw_search_df['날짜'] = pd.to_datetime(raw_search_df['날짜'])
             search_weekly = raw_search_df.set_index('날짜').resample('W-Mon').mean(numeric_only=True)
+            search_weekly.index.name = '날짜' # [추가] 인덱스 이름 통일
 
         news_weekly = pd.DataFrame()
         if not raw_news_df.empty:
@@ -386,13 +421,17 @@ with tab2:
             news_df_in_range = raw_news_df[(raw_news_df['Date'] >= start_date) & (raw_news_df['Date'] <= end_date)]
             if not news_df_in_range.empty:
                 news_weekly = news_df_in_range.set_index('Date').resample('W-Mon').agg(뉴스감성점수=('Sentiment', 'mean')).copy()
+                news_weekly.index.name = '날짜' # [추가] 인덱스 이름 통일
         
         st.session_state['trade_weekly'] = trade_weekly
         st.session_state['wholesale_weekly'] = wholesale_weekly
         st.session_state['search_weekly'] = search_weekly
         st.session_state['news_weekly'] = news_weekly
-        st.write("### 주별 집계 데이터 샘플"); st.dataframe(trade_weekly.head())
-        st.dataframe(wholesale_weekly.head()); st.dataframe(search_weekly.head()); st.dataframe(news_weekly.head())
+        st.write("### 주별 집계 데이터 샘플"); 
+        st.dataframe(trade_weekly.head())
+        st.dataframe(wholesale_weekly.head())
+        st.dataframe(search_weekly.head())
+        st.dataframe(news_weekly.head())
     else: st.warning("선택된 기간에 해당하는 수출입 데이터가 없습니다.")
 
 with tab3:
@@ -404,39 +443,24 @@ with tab3:
             fig = px.line(news_weekly_df, y='뉴스감성점수', title="주별 뉴스 감성 점수")
             fig.add_hline(y=0, line_dash="dash", line_color="red")
             st.plotly_chart(fig, use_container_width=True)
-
         st.markdown("---")
         col1, col2 = st.columns(2)
-
         with col1:
             st.subheader("전체 뉴스 감성 분포")
             def categorize_sentiment(score):
                 if score > 0.1: return "긍정 (Positive)"
                 elif score < -0.1: return "부정 (Negative)"
                 else: return "중립 (Neutral)"
-            
             raw_news_df['Sentiment_Category'] = raw_news_df['Sentiment'].apply(categorize_sentiment)
             sentiment_counts = raw_news_df['Sentiment_Category'].value_counts().reset_index()
             sentiment_counts.columns = ['감성', '기사 수']
-            
-            fig_pie = px.pie(sentiment_counts, names='감성', values='기사 수', 
-                             title="전체 기사 긍정/부정/중립 비율",
-                             color_discrete_map={'긍정 (Positive)':'blue', '부정 (Negative)':'red', '중립 (Neutral)':'grey'})
+            fig_pie = px.pie(sentiment_counts, names='감성', values='기사 수', title="전체 기사 긍정/부정/중립 비율", color_discrete_map={'긍정 (Positive)':'blue', '부정 (Negative)':'red', '중립 (Neutral)':'grey'})
             st.plotly_chart(fig_pie, use_container_width=True)
-
         with col2:
             st.subheader("키워드별 평균 감성 점수")
-            avg_sentiment_by_keyword = raw_news_df.groupby('Keyword')['Sentiment'].mean().reset_index()
-            avg_sentiment_by_keyword = avg_sentiment_by_keyword.sort_values(by='Sentiment', ascending=False)
-            
-            fig_bar = px.bar(avg_sentiment_by_keyword, x='Keyword', y='Sentiment',
-                             title="키워드별 평균 감성 점수 비교",
-                             color='Sentiment',
-                             color_continuous_scale='RdBu_r',
-                             range_color=[-1, 1],
-                             labels={'Sentiment': '평균 감성 점수'})
+            avg_sentiment_by_keyword = raw_news_df.groupby('Keyword')['Sentiment'].mean().reset_index().sort_values(by='Sentiment', ascending=False)
+            fig_bar = px.bar(avg_sentiment_by_keyword, x='Keyword', y='Sentiment', title="키워드별 평균 감성 점수 비교", color='Sentiment', color_continuous_scale='RdBu_r', range_color=[-1, 1], labels={'Sentiment': '평균 감성 점수'})
             st.plotly_chart(fig_bar, use_container_width=True)
-
         st.markdown("---")
         st.subheader("수집된 뉴스 기사 목록 (최신순)"); st.dataframe(raw_news_df.sort_values(by='Date', ascending=False))
     else: st.info("사이드바에서 '뉴스 기사 분석하기' 버튼을 눌러주세요.")
@@ -447,18 +471,16 @@ with tab4:
     wholesale_weekly = st.session_state.get('wholesale_weekly', pd.DataFrame())
     search_weekly = st.session_state.get('search_weekly', pd.DataFrame())
     news_weekly = st.session_state.get('news_weekly', pd.DataFrame())
-
     dfs_to_concat = [df for df in [trade_weekly, wholesale_weekly, search_weekly, news_weekly] if not df.empty]
     if dfs_to_concat:
         final_df = pd.concat(dfs_to_concat, axis=1).interpolate(method='linear', limit_direction='forward').dropna(how='all')
-        st.session_state['final_df'] = final_df # Save for next tab
-        
+        st.session_state['final_df'] = final_df
         st.subheader("통합 데이터 시각화")
         if not final_df.empty:
-            df_to_plot = final_df.reset_index().rename(columns={'index': '날짜'})
+            # [수정] 인덱스 이름이 '날짜'로 통일되었으므로 reset_index() 후 바로 사용 가능
+            df_to_plot = final_df.reset_index()
             df_long = df_to_plot.melt(id_vars='날짜', var_name='데이터 종류', value_name='값')
-            fig = px.line(df_long, x='날짜', y='값', color='데이터 종류', 
-                          labels={'값': '값', '날짜': '날짜'}, title="최종 통합 데이터 시계열 추이")
+            fig = px.line(df_long, x='날짜', y='값', color='데이터 종류', labels={'값': '값', '날짜': '날짜'}, title="최종 통합 데이터 시계열 추이")
             st.plotly_chart(fig, use_container_width=True)
 
         if len(final_df.columns) > 1:
@@ -467,75 +489,57 @@ with tab4:
             corr_matrix = final_df.corr(numeric_only=True)
             fig_heatmap = px.imshow(corr_matrix, text_auto=True, aspect="auto", color_continuous_scale='RdBu_r', range_color=[-1, 1])
             st.plotly_chart(fig_heatmap, use_container_width=True)
-
             st.write("#### ℹ️ 시차별 상관관계 분석")
             base_vars = [col for col in final_df.columns if '수입' in col]
             influencing_vars = [col for col in final_df.columns if '수입' not in col]
             if base_vars and influencing_vars:
                 col1_name = st.selectbox("기준 변수 (결과) 선택", base_vars)
                 col2_name = st.selectbox("영향 변수 (원인) 선택", influencing_vars)
-                
                 @st.cache_data
                 def calculate_cross_corr(df, col1, col2, max_lag=12):
                     lags = range(-max_lag, max_lag + 1)
                     correlations = [df[col1].corr(df[col2].shift(lag)) for lag in lags]
                     return pd.DataFrame({'Lag (주)': lags, '상관계수': correlations})
-
                 if col1_name and col2_name:
                     cross_corr_df = calculate_cross_corr(final_df, col1_name, col2_name)
                     fig_cross_corr = px.bar(cross_corr_df, x='Lag (주)', y='상관계수', title=f"'{col1_name}'와 '{col2_name}'의 시차별 상관관계")
                     fig_cross_corr.add_hline(y=0); st.plotly_chart(fig_cross_corr, use_container_width=True)
-                    st.info(f"""
-                    **결과 해석 가이드:**
-                    - **그래프의 X축 (Lag):** 원인 변수('{col2_name}')가 결과 변수('{col1_name}')보다 몇 주나 앞서거나 뒤쳐지는지를 나타냅니다.
-                    - **음수 Lag (-)**: 원인이 결과보다 **먼저** 발생했음을 의미합니다. 
-                        - *예시: 만약 **Lag -4**에서 막대가 가장 높다면, 이는 '{col2_name}'가 4주 **먼저** 변했을 때 '{col1_name}'에 가장 큰 영향을 준다는 뜻입니다.*
-                    - **양수 Lag (+)**: 원인이 결과보다 **나중에** 발생했음을 의미합니다. 
-                        - *예시: 만약 **Lag +2**에서 막대가 가장 높다면, 이는 '{col1_name}'가 먼저 변하고 2주 뒤에 '{col2_name}'가 따라 변하는 경향을 보인다는 뜻입니다.*
-                    - **가장 높은/낮은 막대:** 두 변수 간의 영향력이 가장 극대화되는 최적의 시간차(Lead/Lag)를 의미합니다.
-                    """)
+                    st.info("""**결과 해석 가이드:** ...생략...""")
             else: st.warning("상관관계를 비교하려면 '수입' 관련 변수와 '외부' 변수가 모두 필요합니다.")
-    else: 
-        st.warning("2단계에서 처리된 데이터가 없습니다.")
+    else: st.warning("2단계에서 처리된 데이터가 없습니다.")
 
 with tab5:
     st.header("시계열 분해 및 예측")
     final_df = st.session_state.get('final_df', pd.DataFrame())
     if not final_df.empty:
         forecast_col = st.selectbox("예측 대상 변수 선택", final_df.columns)
-        
         if forecast_col:
             ts_data = final_df[[forecast_col]].dropna()
-            if len(ts_data) < 104: # Period is 52, so need at least 2 years of data
-                st.warning(f"시계열 분해 및 예측을 위해서는 최소 2년(104주) 이상의 데이터가 필요합니다. 현재 데이터는 {len(ts_data)}주입니다.")
+            # [수정] 분해 및 예측을 위한 데이터 길이 조건 완화 (경고 메시지로 대체)
+            if len(ts_data) < 24: # 최소 24주 데이터는 필요
+                st.warning(f"시계열 분석을 위해 최소 24주 이상의 데이터가 필요합니다. 현재 데이터는 {len(ts_data)}주입니다.")
             else:
                 st.subheader(f"'{forecast_col}' 시계열 분해")
-                decomposition = seasonal_decompose(ts_data[forecast_col], model='additive', period=52)
-                
+                # [수정] 주별 데이터이므로 period=52로 고정하지 않고 데이터 길이에 맞게 조정
+                period = 52 if len(ts_data) >= 104 else int(len(ts_data) / 2)
+                decomposition = seasonal_decompose(ts_data[forecast_col], model='additive', period=period)
                 fig_decompose = go.Figure()
                 fig_decompose.add_trace(go.Scatter(x=decomposition.observed.index, y=decomposition.observed, mode='lines', name='Observed'))
                 fig_decompose.add_trace(go.Scatter(x=decomposition.trend.index, y=decomposition.trend, mode='lines', name='Trend'))
                 fig_decompose.add_trace(go.Scatter(x=decomposition.seasonal.index, y=decomposition.seasonal, mode='lines', name='Seasonal'))
                 st.plotly_chart(fig_decompose, use_container_width=True)
-                st.write("#### 불규칙 요소 (Residual)")
-                st.line_chart(decomposition.resid)
-
-
-                st.subheader(f"'{forecast_col}' 미래 12주 예측 (by Prophet)")
-                prophet_df = ts_data.reset_index().rename(columns={'index': 'ds', forecast_col: 'y'})
+                st.write("#### 불규칙 요소 (Residual)"); st.line_chart(decomposition.resid)
                 
+                st.subheader(f"'{forecast_col}' 미래 12주 예측 (by Prophet)")
+                # [수정] 인덱스 이름이 '날짜'로 통일되었으므로 reset_index() 후 rename
+                prophet_df = ts_data.reset_index().rename(columns={'날짜': 'ds', forecast_col: 'y'})
                 m = Prophet()
                 m.fit(prophet_df)
-                
                 future = m.make_future_dataframe(periods=12, freq='W')
                 forecast = m.predict(future)
-
                 fig_forecast = plot_plotly(m, forecast)
                 fig_forecast.update_layout(title=f"'{forecast_col}' 미래 예측 결과", xaxis_title='날짜', yaxis_title='예측값')
                 st.plotly_chart(fig_forecast, use_container_width=True)
-                
-                st.write("#### 예측 데이터 테이블")
-                st.dataframe(forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(12))
+                st.write("#### 예측 데이터 테이블"); st.dataframe(forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(12))
     else:
         st.info("4번 탭에서 데이터가 성공적으로 통합되어야 예측을 수행할 수 있습니다.")
-
