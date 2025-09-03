@@ -142,7 +142,8 @@ def fetch_and_analyze_news_base(client, keywords, start_date, end_date, models, 
                 model, tokenizer = models[lang]['model'], models[lang]['tokenizer']
                 for article in articles_to_process:
                     try:
-                        article.download(); article.parse()
+                        article.download()
+                        article.parse()
                         pub_date = article.publish_date
                         if pub_date and start_date <= pd.to_datetime(pub_date).tz_localize(None) <= end_date:
                             title = article.title[:256]
@@ -152,7 +153,10 @@ def fetch_and_analyze_news_base(client, keywords, start_date, end_date, models, 
                             sentiment_score = score if label.lower() in ['positive', '5 stars'] else -score if label.lower() in ['negative', '1 star'] else 0.0
                             explanation_json = explain_sentiment(model, tokenizer, title, lang)
                             keyword_articles.append({'Date': pub_date.date(), 'Title': title, 'Sentiment': sentiment_score, 'Keyword': keyword, 'Language': lang, 'Explanation': explanation_json})
-                    except Exception: continue
+                    except Exception as e:
+                        # 오류가 발생한 기사 URL과 오류 메시지를 화면에 출력
+                        st.warning(f"오류 발생: {article.url} - 원인: {e}")
+                        continue # 다음 기사로 계속 진행
                 if keyword_articles: all_news_data.append(pd.DataFrame(keyword_articles))
     if not all_news_data: st.sidebar.warning("수집된 뉴스가 없습니다."); return pd.DataFrame()
     final_df = pd.concat(all_news_data, ignore_index=True)
