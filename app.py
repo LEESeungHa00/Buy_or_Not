@@ -482,7 +482,7 @@ with tab4:
             fig_heatmap = px.imshow(corr_matrix, text_auto=True, aspect="auto", color_continuous_scale='RdBu_r', range_color=[-1, 1])
             st.plotly_chart(fig_heatmap, use_container_width=True)
 
-            st.write("#### 시차별 상관관계 분석")
+            st.write("#### ℹ️ 시차별 상관관계 분석")
             base_vars = [col for col in final_df.columns if '수입' in col]
             influencing_vars = [col for col in final_df.columns if '수입' not in col]
             if base_vars and influencing_vars:
@@ -499,7 +499,15 @@ with tab4:
                     cross_corr_df = calculate_cross_corr(final_df, col1_name, col2_name)
                     fig_cross_corr = px.bar(cross_corr_df, x='Lag (주)', y='상관계수', title=f"'{col1_name}'와 '{col2_name}'의 시차별 상관관계")
                     fig_cross_corr.add_hline(y=0); st.plotly_chart(fig_cross_corr, use_container_width=True)
-                    st.info(f"""- **양수 Lag (+)**: **'{col2_name}'** (원인)이 '{col1_name}'(결과)보다 **나중에** 움직일 때의 상관관계입니다. \n- **음수 Lag (-)**: **'{col2_name}'** (원인)이 '{col1_name}'(결과)보다 **먼저** 움직일 때의 상관관계를 의미합니다.""")
+                    st.info(f"""
+                    **결과 해석 가이드:**
+                    - **그래프의 X축 (Lag):** 원인 변수('{col2_name}')가 결과 변수('{col1_name}')보다 몇 주나 앞서거나 뒤쳐지는지를 나타냅니다.
+                    - **음수 Lag (-)**: 원인이 결과보다 **먼저** 발생했음을 의미합니다. 
+                        - *예시: 만약 **Lag -4**에서 막대가 가장 높다면, 이는 '{col2_name}'가 4주 **먼저** 변했을 때 '{col1_name}'에 가장 큰 영향을 준다는 뜻입니다.*
+                    - **양수 Lag (+)**: 원인이 결과보다 **나중에** 발생했음을 의미합니다. 
+                        - *예시: 만약 **Lag +2**에서 막대가 가장 높다면, 이는 '{col1_name}'가 먼저 변하고 2주 뒤에 '{col2_name}'가 따라 변하는 경향을 보인다는 뜻입니다.*
+                    - **가장 높은/낮은 막대:** 두 변수 간의 영향력이 가장 극대화되는 최적의 시간차(Lead/Lag)를 의미합니다.
+                    """)
             else: st.warning("상관관계를 비교하려면 '수입' 관련 변수와 '외부' 변수가 모두 필요합니다.")
     else: 
         st.warning("2단계에서 처리된 데이터가 없습니다.")
