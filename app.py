@@ -90,7 +90,6 @@ def deduplicate_and_write_to_bq(client, df_new, table_name):
             df_existing = pd.DataFrame()
 
         df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-        # Title이 있는 뉴스 데이터의 경우 Title 기준으로 중복 제거
         subset_cols = ['Title', 'Keyword', 'Language'] if 'Title' in df_combined.columns else None
         df_deduplicated = df_combined.drop_duplicates(subset=subset_cols)
 
@@ -107,47 +106,56 @@ def add_trade_data_to_bq(client, df):
     df.columns = df.columns.str.replace(' ', '_').str.replace('[^A-Za-z0-9_]', '', regex=True)
     deduplicate_and_write_to_bq(client, df, "tds_data")
 
-def fetch_and_analyze_news(client, keywords, start_date, end_date, models):
-    """뉴스를 크롤링하고 감성 분석을 수행한 후, BigQuery에 캐싱합니다."""
-    project_id = client.project; table_name = "news_sentiment_cache"
-    table_id = f"{project_id}.data_explorer.{table_name}"
+def fetch_historical_news(client, keywords, start_date, end_date, models):
+    """[1단계: 일회성] newspaper3k로 과거 데이터를 최대한 수집합니다."""
     all_news_data = []
-
     for keyword in keywords:
-        try: # Check cache first
-            sql = f"SELECT * FROM `{table_id}` WHERE Keyword = '{keyword}' AND Date >= '{start_date.strftime('%Y-%m-%d')}' AND Date <= '{end_date.strftime('%Y-%m-%d')}'"
-            df_cache = client.query(sql).to_dataframe()
-            if not df_cache.empty:
-                st.sidebar.info(f"'{keyword}' 뉴스 데이터를 BigQuery 캐시에서 로드했습니다.")
-                all_news_data.append(df_cache)
-                continue
-        except Exception: pass
-
-        with st.spinner(f"'{keyword}' 관련 뉴스를 크롤링하고 분석하는 중..."):
-            news_url = f"https://news.google.com/search?q={keyword}&hl=ko&gl=KR&ceid=KR%3Ako"
-            paper = build(news_url, memoize_articles=False, language='ko')
-            keyword_articles = []
-            for article in paper.articles[:25]:
-                try:
-                    article.download(); article.parse()
-                    pub_date = article.publish_date
-                    if pub_date and start_date <= pub_date.replace(tzinfo=None) <= end_date:
-                        title_to_analyze = article.title[:256]
-                        analysis = models['ko'](title_to_analyze)[0]
-                        label = analysis['label']
-                        score = analysis['score']
-                        sentiment_score = score if label == 'positive' else -score if label == 'negative' else 0.0
-                        keyword_articles.append({'Date': pub_date.date(), 'Title': article.title, 'Sentiment': sentiment_score, 'Keyword': keyword, 'Language': 'ko'})
-                except Exception: continue
-            
-            if keyword_articles:
-                df_new = pd.DataFrame(keyword_articles)
-                all_news_data.append(df_new)
-                deduplicate_and_write_to_bq(client, df_new, table_name)
-
-    if not all_news_data: return pd.DataFrame()
+        for lang, country in [('ko', 'KR'), ('en', 'US')]:
+            with st.spinner(f"과거 뉴스 수집 중: '{keyword}' ({lang})... (시간이 매우 오래 걸릴 수 있습니다)"):
+                news_url = f"https://news.google.com/search?q={keyword}&hl={lang}&gl={country}&ceid={country}%3A{lang}"
+                paper = build(news_url, memoize_articles=False, language=lang)
+                keyword_articles = []
+                for article in paper.articles[:50]: # Limit articles to avoid timeout
+                    try:
+                        article.download(); article.parse()
+                        pub_date = article.publish_date
+                        if pub_date and start_date <= pub_date.replace(tzinfo=None) <= end_date:
+                            model = models[lang]
+                            analysis = model(article.title[:256])[0]
+                            score = analysis['score'] if analysis['label'].lower() in ['positive', '5 stars'] else -analysis['score']
+                            keyword_articles.append({'Date': pub_date.date(), 'Title': article.title, 'Sentiment': score, 'Keyword': keyword, 'Language': lang})
+                    except Exception: continue
+                if keyword_articles: all_news_data.append(pd.DataFrame(keyword_articles))
+    
+    if not all_news_data: st.sidebar.warning("수집된 과거 뉴스가 없습니다."); return
     final_df = pd.concat(all_news_data, ignore_index=True)
-    final_df['Date'] = pd.to_datetime(final_df['Date'])
+    deduplicate_and_write_to_bq(client, final_df, "news_sentiment_cache")
+    return final_df
+
+def fetch_latest_news_rss(client, keywords, models):
+    """[2단계: 지속적] RSS 피드로 최신 뉴스를 안정적으로 수집합니다."""
+    all_news_data = []
+    for keyword in keywords:
+        for lang, country in [('ko', 'KR'), ('en', 'US')]:
+            with st.spinner(f"최신 뉴스 수집 중: '{keyword}' ({lang})..."):
+                rss_url = f"https://news.google.com/rss/search?q={keyword}&hl={lang}&gl={country}&ceid={country}:{lang}"
+                feed = feedparser.parse(rss_url)
+                keyword_articles = []
+                for entry in feed.entries[:25]:
+                    try:
+                        article = Article(entry.link)
+                        article.download(); article.parse()
+                        pub_date = article.publish_date if article.publish_date else datetime.now()
+                        model = models[lang]
+                        analysis = model(article.title[:256])[0]
+                        score = analysis['score'] if analysis['label'].lower() in ['positive', '5 stars'] else -analysis['score']
+                        keyword_articles.append({'Date': pub_date.date(), 'Title': article.title, 'Sentiment': score, 'Keyword': keyword, 'Language': lang})
+                    except Exception: continue
+                if keyword_articles: all_news_data.append(pd.DataFrame(keyword_articles))
+
+    if not all_news_data: st.sidebar.warning("수집된 최신 뉴스가 없습니다."); return
+    final_df = pd.concat(all_news_data, ignore_index=True)
+    deduplicate_and_write_to_bq(client, final_df, "news_sentiment_cache")
     return final_df
 
 def fetch_yfinance_data(tickers, start_date, end_date):
