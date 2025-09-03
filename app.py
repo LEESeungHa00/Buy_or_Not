@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
 import requests
 from datetime import datetime, timedelta
 from functools import reduce
@@ -14,6 +15,9 @@ from google.cloud import bigquery
 import pandas_gbq
 from newspaper import build
 from transformers import pipeline
+from statsmodels.tsa.seasonal import seasonal_decompose
+from prophet import Prophet
+from prophet.plot import plot_plotly
 
 # --- BigQuery Connection (Manual Method for Stability) ---
 @st.cache_resource
@@ -112,13 +116,13 @@ def fetch_and_analyze_news(client, keywords, start_date, end_date, model):
                 st.sidebar.info(f"'{keyword}' 뉴스 데이터를 BigQuery 캐시에서 로드했습니다.")
                 all_news_data.append(df_cache)
                 continue
-        except Exception: pass # Cache table might not exist yet
+        except Exception: pass
 
         with st.spinner(f"'{keyword}' 관련 뉴스를 크롤링하고 분석하는 중..."):
             news_url = f"https://news.google.com/search?q={keyword}&hl=ko&gl=KR&ceid=KR%3Ako"
             paper = build(news_url, memoize_articles=False, language='ko')
             keyword_articles = []
-            for article in paper.articles[:25]: # Limit articles for speed
+            for article in paper.articles[:25]:
                 try:
                     article.download(); article.parse()
                     pub_date = article.publish_date
@@ -211,6 +215,10 @@ def fetch_kamis_data(item_info, start_date, end_date, kamis_keys):
     return df
 
 # --- Constants & App ---
+COFFEE_TICKERS_YFINANCE = {"미국 커피 C": "KC=F", "런던 로부스타": "RC=F"}
+KAMIS_CATEGORIES = {"채소류": "100", "과일류": "200", "축산물": "300", "수산물": "400"}
+KAMIS_ITEMS = {"채소류": {"배추": "111", "무": "112", "양파": "114", "마늘": "141"}, "과일류": {"사과": "211", "바나나": "214", "아보카도": "215"}, "축산물": {"소고기": "311", "돼지고기": "312"}, "수산물": {"고등어": "411", "오징어": "413"}}
+
 st.set_page_config(layout="wide")
 st.title("📊 데이터 탐색 및 통합 분석 대시보드")
 
@@ -227,7 +235,6 @@ if 'data_loaded' not in st.session_state:
 if 'categories' not in st.session_state:
     st.session_state.categories = get_categories_from_bq(bq_client)
 
-# --- [FIX START] Always show analysis UI and data adding option ---
 st.sidebar.subheader("1. 분석 대상 설정")
 if not st.session_state.categories:
     st.sidebar.warning("BigQuery에 데이터가 없습니다. 아래에서 새 데이터를 추가해주세요.")
@@ -247,7 +254,6 @@ if st.sidebar.button("🚀 선택 완료 및 분석 시작", disabled=(not st.se
         else:
             st.sidebar.error("데이터를 불러오지 못했습니다.")
 
-# Always available expander for adding new data
 with st.sidebar.expander("➕ 새 수출입 데이터 추가"):
     uploaded_file = st.file_uploader("새 파일 업로드하여 BigQuery에 추가", type=['csv', 'xlsx'])
     if uploaded_file:
@@ -256,7 +262,6 @@ with st.sidebar.expander("➕ 새 수출입 데이터 추가"):
             add_trade_data_to_bq(bq_client, df_new)
             st.session_state.clear()
             st.rerun()
-# --- [FIX END] ---
 
 if not st.session_state.data_loaded:
     st.info("👈 사이드바에서 분석할 카테고리를 선택하고 '분석 시작' 버튼을 눌러주세요.")
@@ -282,10 +287,6 @@ except Exception as e:
     st.error(f"데이터 처리 중 오류: {e}"); st.stop()
 
 # --- External Data Loading Section ---
-COFFEE_TICKERS_YFINANCE = {"미국 커피 C": "KC=F", "런던 로부스타": "RC=F"}
-KAMIS_CATEGORIES = {"채소류": "100", "과일류": "200", "축산물": "300", "수산물": "400"}
-KAMIS_ITEMS = {"채소류": {"배추": "111", "무": "112", "양파": "114", "마늘": "141"}, "과일류": {"사과": "211", "바나나": "214", "아보카도": "215"}, "축산물": {"소고기": "311", "돼지고기": "312"}, "수산물": {"고등어": "411", "오징어": "413"}}
-
 st.sidebar.subheader("🔗 외부 가격 데이터")
 is_coffee_selected = any('커피' in str(cat) for cat in selected_categories)
 if is_coffee_selected:
@@ -329,8 +330,8 @@ if st.sidebar.button("뉴스 기사 분석하기"):
 raw_news_df = st.session_state.get('news_data', pd.DataFrame())
 
 # --- Main Display Area ---
-tab_list = ["1️⃣ 원본 데이터", "2️⃣ 데이터 표준화", "3️⃣ 뉴스 감성 분석", "4️⃣ 최종 분석"]
-tab1, tab2, tab3, tab4 = st.tabs(tab_list)
+tab_list = ["1️⃣ 원본 데이터", "2️⃣ 데이터 표준화", "3️⃣ 뉴스 감성 분석", "4️⃣ 상관관계 분석", "📈 시계열 분해 및 예측"]
+tab1, tab2, tab3, tab4, tab5 = st.tabs(tab_list)
 
 with tab1:
     st.subheader("A. 수출입 데이터"); st.dataframe(raw_trade_df.head())
@@ -388,26 +389,22 @@ with tab3:
     else: st.info("사이드바에서 '뉴스 기사 분석하기' 버튼을 눌러주세요.")
 
 with tab4:
-    st.header("최종 통합 데이터 및 상관관계 분석")
+    st.header("상관관계 분석")
     trade_weekly = st.session_state.get('trade_weekly', pd.DataFrame())
     wholesale_weekly = st.session_state.get('wholesale_weekly', pd.DataFrame())
     search_weekly = st.session_state.get('search_weekly', pd.DataFrame())
     news_weekly = st.session_state.get('news_weekly', pd.DataFrame())
 
-    if not trade_weekly.empty:
-        dfs_to_concat = [df for df in [trade_weekly, wholesale_weekly, search_weekly, news_weekly] if not df.empty]
-        # --- [FIX] Use pd.concat for robust merging ---
-        final_df = pd.concat(dfs_to_concat, axis=1)
-        final_df = final_df.interpolate(method='linear', limit_direction='forward').dropna(how='all')
+    dfs_to_concat = [df for df in [trade_weekly, wholesale_weekly, search_weekly, news_weekly] if not df.empty]
+    if dfs_to_concat:
+        final_df = pd.concat(dfs_to_concat, axis=1).interpolate(method='linear', limit_direction='forward').dropna(how='all')
+        st.session_state['final_df'] = final_df # Save for next tab
         
-        st.subheader("최종 통합 데이터셋"); st.dataframe(final_df)
-        if not final_df.empty:
-            st.subheader("통합 데이터 시각화")
-            # --- [FIX] Plotting with reset_index for stability ---
-            df_to_plot = final_df.reset_index().rename(columns={'index': '날짜'})
-            fig = px.line(df_to_plot, x='날짜', y=df_to_plot.columns[1:],
-                          labels={'value': '값', 'variable': '데이터 종류'}, title="최종 통합 데이터 시계열 추이")
-            st.plotly_chart(fig, use_container_width=True)
+        st.subheader("통합 데이터 시각화")
+        df_to_plot = final_df.reset_index().rename(columns={'index': '날짜'})
+        fig = px.line(df_to_plot, x='날짜', y=df_to_plot.columns[1:],
+                      labels={'value': '값', 'variable': '데이터 종류'}, title="최종 통합 데이터 시계열 추이")
+        st.plotly_chart(fig, use_container_width=True)
 
         if len(final_df.columns) > 1:
             st.markdown("---"); st.subheader("상관관계 분석")
@@ -435,5 +432,47 @@ with tab4:
                     fig_cross_corr.add_hline(y=0); st.plotly_chart(fig_cross_corr, use_container_width=True)
                     st.info(f"""- **양수 Lag (+)**: **'{col2_name}'** (원인)이 '{col1_name}'(결과)보다 **나중에** 움직일 때의 상관관계입니다. \n- **음수 Lag (-)**: **'{col2_name}'** (원인)이 '{col1_name}'(결과)보다 **먼저** 움직일 때의 상관관계를 의미합니다.""")
             else: st.warning("상관관계를 비교하려면 '수입' 관련 변수와 '외부' 변수가 모두 필요합니다.")
-    else: st.warning("2단계에서 처리된 데이터가 없습니다.")
+    else: 
+        st.warning("2단계에서 처리된 데이터가 없습니다.")
+
+with tab5:
+    st.header("시계열 분해 및 예측")
+    final_df = st.session_state.get('final_df', pd.DataFrame())
+    if not final_df.empty:
+        forecast_col = st.selectbox("예측 대상 변수 선택", final_df.columns)
+        
+        if forecast_col:
+            ts_data = final_df[[forecast_col]].dropna()
+            if len(ts_data) < 104: # Period is 52, so need at least 2 years of data
+                st.warning(f"시계열 분해 및 예측을 위해서는 최소 2년(104주) 이상의 데이터가 필요합니다. 현재 데이터는 {len(ts_data)}주입니다.")
+            else:
+                st.subheader(f"'{forecast_col}' 시계열 분해")
+                decomposition = seasonal_decompose(ts_data[forecast_col], model='additive', period=52)
+                
+                fig_decompose = go.Figure()
+                fig_decompose.add_trace(go.Scatter(x=decomposition.observed.index, y=decomposition.observed, mode='lines', name='Observed'))
+                fig_decompose.add_trace(go.Scatter(x=decomposition.trend.index, y=decomposition.trend, mode='lines', name='Trend'))
+                fig_decompose.add_trace(go.Scatter(x=decomposition.seasonal.index, y=decomposition.seasonal, mode='lines', name='Seasonal'))
+                st.plotly_chart(fig_decompose, use_container_width=True)
+                st.write("#### 불규칙 요소 (Residual)")
+                st.line_chart(decomposition.resid)
+
+
+                st.subheader(f"'{forecast_col}' 미래 12주 예측 (by Prophet)")
+                prophet_df = ts_data.reset_index().rename(columns={'index': 'ds', forecast_col: 'y'})
+                
+                m = Prophet()
+                m.fit(prophet_df)
+                
+                future = m.make_future_dataframe(periods=12, freq='W')
+                forecast = m.predict(future)
+
+                fig_forecast = plot_plotly(m, forecast)
+                fig_forecast.update_layout(title=f"'{forecast_col}' 미래 예측 결과", xaxis_title='날짜', yaxis_title='예측값')
+                st.plotly_chart(fig_forecast, use_container_width=True)
+                
+                st.write("#### 예측 데이터 테이블")
+                st.dataframe(forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(12))
+    else:
+        st.info("4번 탭에서 데이터가 성공적으로 통합되어야 예측을 수행할 수 있습니다.")
 
