@@ -219,18 +219,13 @@ def fetch_trends_data(keywords, start_date, end_date, naver_keys):
     return reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), all_data)
 
 def fetch_kamis_data(client, item_info, start_date, end_date, kamis_keys):
-    # [수정] API 호출에 사용할 시작일과 종료일 포맷
     start_str = start_date.strftime('%Y-%m-%d')
     end_str = end_date.strftime('%Y-%m-%d')
     
     item_code = item_info['item_code']
     kind_code = item_info['kind_code']
 
-    # BigQuery 캐시 확인 로직은 그대로 유지할 수 있습니다 (선택사항)
-    # ...
-
     with st.spinner("KAMIS에서 기간 데이터를 한 번에 조회하는 중..."):
-        # [수정] periodWholesaleProductList 액션을 사용하는 새 URL
         url = (
             "http://www.kamis.or.kr/service/price/xml.do"
             "?action=periodWholesaleProductList"
@@ -251,7 +246,6 @@ def fetch_kamis_data(client, item_info, start_date, end_date, kamis_keys):
             response = requests.get(url, timeout=20)
             if response.status_code == 200:
                 data = response.json()
-                # API 응답에 따라 'data' 키가 없을 수도, 'item'이 없을 수도 있음
                 if data and "data" in data and data["data"] and "item" in data["data"]:
                     price_data = data["data"]["item"]
                     
@@ -260,18 +254,22 @@ def fetch_kamis_data(client, item_info, start_date, end_date, kamis_keys):
                         return pd.DataFrame()
                         
                     df_new = pd.DataFrame(price_data)
-                    
-                    # [수정] 데이터프레임 컬럼 정리
-                    # API 응답 컬럼명(예: yyyy, regday, price)을 앱에서 사용하는 이름으로 변경
                     df_new = df_new.rename(columns={'regday': '날짜', 'price': '도매가격_원'})
-                    
-                    # 필요한 컬럼만 선택하고 데이터 타입 변환
                     df_new = df_new[['날짜', '도매가격_원']]
-                    df_new['날짜'] = pd.to_datetime(df_new['날짜'])
-                    # 가격 문자열에서 쉼표(,) 제거 후 숫자 타입으로 변환
+
+
+                    # API가 'MM-dd' 형식으로 날짜를 반환할 때를 대비한 처리
+                    def format_date(date_str):
+                        # 'yyyy-MM-dd' 형식이면 그대로 사용
+                        if len(date_str) > 5:
+                            return date_str
+                        # 'MM-dd' 형식이면 현재 조회 중인 연도를 붙여줌
+                        else:
+                            # start_date에서 연도를 가져와서 사용
+                            return f"{start_date.year}-{date_str}"
+
+                    df_new['날짜'] = pd.to_datetime(df_new['날짜'].apply(format_date))
                     df_new['도매가격_원'] = pd.to_numeric(df_new['도매가격_원'].str.replace(',', ''), errors='coerce')
-                    
-                    # BigQuery에 캐시로 저장하는 로직을 여기에 추가할 수 있습니다.
                     
                     return df_new
                 else:
