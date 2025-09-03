@@ -304,11 +304,10 @@ try:
 except Exception as e:
     st.error(f"데이터 처리 중 오류: {e}"); st.stop()
 
-# --- [FIX START] Pre-initialize all raw dataframes ---
+# --- Pre-initialize all raw dataframes ---
 raw_wholesale_df = st.session_state.get('wholesale_data', pd.DataFrame())
 raw_search_df = st.session_state.get('search_data', pd.DataFrame())
 raw_news_df = st.session_state.get('news_data', pd.DataFrame())
-# --- [FIX END] ---
 
 # --- External Data Loading Section ---
 st.sidebar.subheader("🔗 외부 가격 데이터")
@@ -419,6 +418,40 @@ with tab3:
             fig = px.line(news_weekly_df, y='뉴스감성점수', title="주별 뉴스 감성 점수")
             fig.add_hline(y=0, line_dash="dash", line_color="red")
             st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("---")
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.subheader("전체 뉴스 감성 분포")
+            def categorize_sentiment(score):
+                if score > 0.1: return "긍정 (Positive)"
+                elif score < -0.1: return "부정 (Negative)"
+                else: return "중립 (Neutral)"
+            
+            raw_news_df['Sentiment_Category'] = raw_news_df['Sentiment'].apply(categorize_sentiment)
+            sentiment_counts = raw_news_df['Sentiment_Category'].value_counts().reset_index()
+            sentiment_counts.columns = ['감성', '기사 수']
+            
+            fig_pie = px.pie(sentiment_counts, names='감성', values='기사 수', 
+                             title="전체 기사 긍정/부정/중립 비율",
+                             color_discrete_map={'긍정 (Positive)':'blue', '부정 (Negative)':'red', '중립 (Neutral)':'grey'})
+            st.plotly_chart(fig_pie, use_container_width=True)
+
+        with col2:
+            st.subheader("키워드별 평균 감성 점수")
+            avg_sentiment_by_keyword = raw_news_df.groupby('Keyword')['Sentiment'].mean().reset_index()
+            avg_sentiment_by_keyword = avg_sentiment_by_keyword.sort_values(by='Sentiment', ascending=False)
+            
+            fig_bar = px.bar(avg_sentiment_by_keyword, x='Keyword', y='Sentiment',
+                             title="키워드별 평균 감성 점수 비교",
+                             color='Sentiment',
+                             color_continuous_scale='RdBu_r',
+                             range_color=[-1, 1],
+                             labels={'Sentiment': '평균 감성 점수'})
+            st.plotly_chart(fig_bar, use_container_width=True)
+
+        st.markdown("---")
         st.subheader("수집된 뉴스 기사 목록 (최신순)"); st.dataframe(raw_news_df.sort_values(by='Date', ascending=False))
     else: st.info("사이드바에서 '뉴스 기사 분석하기' 버튼을 눌러주세요.")
 
