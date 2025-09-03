@@ -57,7 +57,16 @@ def get_categories_from_bq(_client):
             df = _client.query(query).to_dataframe()
         return sorted(df['Category'].astype(str).unique())
     except Exception as e:
-        print(f"Could not fetch categories (table might not exist yet): {e}")
+        # --- [IMPROVEMENT] Show specific error to user ---
+        st.error(f"""
+        **BigQuery 테이블({table_id})을 읽는 중 오류가 발생했습니다.**
+        
+        1.  Google Cloud Console에서 **데이터세트(`data_explorer`)**와 **테이블(`tds_data`)**이 정확히 존재하는지 확인해주세요.
+        2.  서비스 계정에 **'BigQuery 데이터 뷰어(BigQuery Data Viewer)'** 역할이 부여되었는지 확인해주세요.
+        
+        **원본 오류 메시지:**
+        `{e}`
+        """)
         return []
 
 def get_trade_data_from_bq(client, categories):
