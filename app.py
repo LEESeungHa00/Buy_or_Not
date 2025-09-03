@@ -12,6 +12,8 @@ import yfinance as yf
 from google.oauth2 import service_account
 from google.cloud import bigquery
 import pandas_gbq
+from newspaper import build
+from transformers import pipeline
 
 # --- BigQuery Connection (Manual Method for Stability) ---
 @st.cache_resource
@@ -26,7 +28,15 @@ def get_bq_connection():
         st.error(f"Google BigQuery 연결에 실패했습니다. secrets.toml의 [gcp_service_account] 설정을 확인하세요: {e}")
         return None
 
-# --- Data Fetching & Processing Functions (Optimized BigQuery Version) ---
+# --- Sentiment Analysis Model ---
+@st.cache_resource
+def load_sentiment_model():
+    """감성 분석 모델을 로드합니다. 최초 실행 시 몇 분 소요될 수 있습니다."""
+    with st.spinner("감성 분석 AI 모델을 로드하는 중..."):
+        model = pipeline("sentiment-analysis", model="monologg/kobert-nsmc")
+    return model
+
+# --- Data Fetching & Processing Functions ---
 @st.cache_data(ttl=3600)
 def get_categories_from_bq(_client):
     """BigQuery에서 고유 카테고리 목록만 빠르게 가져옵니다."""
@@ -87,7 +97,47 @@ def add_trade_data_to_bq(client, df):
     df.columns = df.columns.str.replace(' ', '_').str.replace('[^A-Za-z0-9_]', '', regex=True)
     deduplicate_and_write_to_bq(client, df, "tds_data")
 
-# (기타 API fetch 함수들은 기존과 동일하게 유지)
+def fetch_and_analyze_news(client, keywords, start_date, end_date, model):
+    """뉴스를 크롤링하고 감성 분석을 수행한 후, BigQuery에 캐싱합니다."""
+    project_id = client.project; table_name = "news_sentiment_cache"
+    table_id = f"{project_id}.data_explorer.{table_name}"
+    all_news_data = []
+
+    for keyword in keywords:
+        try: # Check cache first
+            sql = f"SELECT * FROM `{table_id}` WHERE Keyword = '{keyword}' AND Date >= '{start_date.strftime('%Y-%m-%d')}' AND Date <= '{end_date.strftime('%Y-%m-%d')}'"
+            df_cache = client.query(sql).to_dataframe()
+            if not df_cache.empty:
+                st.sidebar.info(f"'{keyword}' 뉴스 데이터를 BigQuery 캐시에서 로드했습니다.")
+                all_news_data.append(df_cache)
+                continue
+        except Exception: pass # Cache table might not exist yet
+
+        with st.spinner(f"'{keyword}' 관련 뉴스를 크롤링하고 분석하는 중..."):
+            news_url = f"https://news.google.com/search?q={keyword}&hl=ko&gl=KR&ceid=KR%3Ako"
+            paper = build(news_url, memoize_articles=False, language='ko')
+            keyword_articles = []
+            for article in paper.articles[:25]: # Limit articles for speed
+                try:
+                    article.download(); article.parse()
+                    pub_date = article.publish_date
+                    if pub_date and start_date <= pub_date.replace(tzinfo=None) <= end_date:
+                        title_to_analyze = article.title[:256]
+                        analysis = model(title_to_analyze)[0]
+                        score = analysis['score'] if analysis['label'] == 'positive' else -analysis['score']
+                        keyword_articles.append({'Date': pub_date.date(), 'Title': article.title, 'Sentiment': score, 'Keyword': keyword})
+                except Exception: continue
+            
+            if keyword_articles:
+                df_new = pd.DataFrame(keyword_articles)
+                all_news_data.append(df_new)
+                deduplicate_and_write_to_bq(client, df_new, table_name)
+
+    if not all_news_data: return pd.DataFrame()
+    final_df = pd.concat(all_news_data, ignore_index=True)
+    final_df['Date'] = pd.to_datetime(final_df['Date'])
+    return final_df
+
 def fetch_yfinance_data(tickers, start_date, end_date):
     all_data = []
     for name, ticker in tickers.items():
@@ -157,21 +207,17 @@ def fetch_kamis_data(item_info, start_date, end_date, kamis_keys):
     df = pd.DataFrame(all_data)
     return df
 
-# --- Constants ---
-COFFEE_TICKERS_YFINANCE = {"미국 커피 C": "KC=F", "런던 로부스타": "RC=F"}
-KAMIS_CATEGORIES = {"채소류": "100", "과일류": "200", "축산물": "300", "수산물": "400"}
-KAMIS_ITEMS = {"채소류": {"배추": "111", "무": "112", "양파": "114", "마늘": "141"}, "과일류": {"사과": "211", "바나나": "214", "아보카도": "215"}, "축산물": {"소고기": "311", "돼지고기": "312"}, "수산물": {"고등어": "411", "오징어": "413"}}
-
-# --- Streamlit App ---
+# --- Constants & App ---
 st.set_page_config(layout="wide")
-st.title("📊 데이터 탐색 및 통합 대시보드 (Google BigQuery 연동)")
+st.title("📊 데이터 탐색 및 통합 분석 대시보드")
 
 bq_client = get_bq_connection()
+sentiment_model = load_sentiment_model()
 if bq_client is None: st.stop()
 
 st.sidebar.header("⚙️ 분석 설정")
 
-# --- App Startup Workflow (Optimized BigQuery Version) ---
+# --- App Startup Workflow ---
 if 'data_loaded' not in st.session_state:
     st.session_state.data_loaded = False
     st.session_state.categories = get_categories_from_bq(bq_client)
@@ -192,40 +238,36 @@ if not st.session_state.data_loaded:
     st.sidebar.subheader("1. 분석 대상 설정")
     selected_categories = st.sidebar.multiselect("분석할 품목 카테고리 선택", st.session_state.categories)
     if st.sidebar.button("🚀 선택 완료 및 분석 시작"):
-        if not selected_categories:
-            st.sidebar.warning("분석할 카테고리를 하나 이상 선택해주세요.")
+        if not selected_categories: st.sidebar.warning("카테고리를 선택해주세요.")
         else:
             st.session_state.raw_trade_df = get_trade_data_from_bq(bq_client, selected_categories)
             if st.session_state.raw_trade_df is not None and not st.session_state.raw_trade_df.empty:
                 st.session_state.data_loaded = True
                 st.session_state.selected_categories = selected_categories
                 st.rerun()
-            else:
-                st.sidebar.error("선택한 카테고리의 데이터를 불러오지 못했습니다.")
+            else: st.sidebar.error("데이터를 불러오지 못했습니다.")
     else:
         st.info("👈 사이드바에서 분석할 카테고리를 선택하고 '분석 시작' 버튼을 눌러주세요.")
         st.stop()
 
-# --- Analysis UI (runs only after data is loaded) ---
+# --- Analysis UI ---
 raw_trade_df = st.session_state.raw_trade_df
 selected_categories = st.session_state.selected_categories
-
-st.sidebar.success(f"**{', '.join(selected_categories)}** 카테고리 데이터 로드 완료!")
+st.sidebar.success(f"**{', '.join(selected_categories)}** 데이터 로드 완료!")
 st.sidebar.markdown("---")
 
 try:
     file_start_date, file_end_date = raw_trade_df['Date'].min(), raw_trade_df['Date'].max()
     default_keywords = ", ".join(selected_categories) if selected_categories else ""
-    keyword_input = st.sidebar.text_input("3. 검색어 입력 (쉼표로 구분)", default_keywords)
+    keyword_input = st.sidebar.text_input("검색어/뉴스 분석 키워드 입력", default_keywords)
     search_keywords = [k.strip() for k in keyword_input.split(',') if k.strip()]
-    st.sidebar.subheader("4. 분석 기간 설정")
+    st.sidebar.subheader("분석 기간 설정")
     start_date_input = st.sidebar.date_input('시작일', file_start_date, min_value=file_start_date, max_value=file_end_date)
     end_date_input = st.sidebar.date_input('종료일', file_end_date, min_value=start_date_input, max_value=file_end_date)
     start_date = pd.to_datetime(start_date_input)
     end_date = pd.to_datetime(end_date_input)
 except Exception as e:
-    st.error(f"데이터 처리 중 오류가 발생했습니다. 'Date' 또는 'Category' 컬럼의 데이터 형식을 확인해주세요: {e}")
-    st.stop()
+    st.error(f"데이터 처리 중 오류: {e}"); st.stop()
 
 # --- External Data Loading Section ---
 st.sidebar.subheader("🔗 외부 가격 데이터")
@@ -261,137 +303,117 @@ if st.sidebar.button("검색량 데이터 가져오기"):
         st.session_state['search_data'] = df
 raw_search_df = st.session_state.get('search_data', pd.DataFrame())
 
+# --- News Analysis Section ---
+st.sidebar.subheader("📰 뉴스 감성 분석")
+if st.sidebar.button("뉴스 기사 분석하기"):
+    if not search_keywords: st.sidebar.warning("분석할 키워드를 먼저 입력해주세요.")
+    else:
+        df = fetch_and_analyze_news(bq_client, search_keywords, start_date, end_date, sentiment_model)
+        st.session_state['news_data'] = df
+raw_news_df = st.session_state.get('news_data', pd.DataFrame())
+
 # --- Main Display Area ---
-tab1, tab2, tab3 = st.tabs(["1️⃣ 원본 데이터 확인", "2️⃣ 데이터 표준화", "3️⃣ 최종 통합 데이터 및 상관관계 분석"])
+tab_list = ["1️⃣ 원본 데이터", "2️⃣ 데이터 표준화", "3️⃣ 뉴스 감성 분석", "4️⃣ 최종 분석"]
+tab1, tab2, tab3, tab4 = st.tabs(tab_list)
+
 with tab1:
-    st.subheader("A. 수출입 데이터 (from BigQuery)"); 
-    st.dataframe(raw_trade_df.head())
+    st.subheader("A. 수출입 데이터"); st.dataframe(raw_trade_df.head())
     st.subheader("B. 외부 가격 데이터"); st.dataframe(raw_wholesale_df.head())
     st.subheader("C. 검색량 데이터"); st.dataframe(raw_search_df.head())
+    st.subheader("D. 뉴스 데이터"); st.dataframe(raw_news_df.head())
 
 with tab2:
-    st.header("2. 데이터 표준화: 같은 기준으로 데이터 맞춰주기")
-    if not selected_categories: 
-        st.warning("분석할 카테고리를 선택해주세요.")
-    else:
-        st.subheader("2-1. 분석 대상 품목 필터링")
-        trade_df_in_range = raw_trade_df[(raw_trade_df['Date'] >= start_date) & (raw_trade_df['Date'] <= end_date)]
-        filtered_trade_df = trade_df_in_range[trade_df_in_range['Category'].isin(selected_categories)].copy()
+    st.header("데이터 표준화: 같은 기준으로 데이터 맞춰주기")
+    trade_df_in_range = raw_trade_df[(raw_trade_df['Date'] >= start_date) & (raw_trade_df['Date'] <= end_date)]
+    filtered_trade_df = trade_df_in_range[trade_df_in_range['Category'].isin(selected_categories)].copy()
+    
+    if not filtered_trade_df.empty:
+        filtered_trade_df.set_index('Date', inplace=True)
+        trade_weekly = filtered_trade_df.resample('W-Mon').agg(수입액_USD=('Value', 'sum'), 수입량_KG=('Volume', 'sum')).copy()
+        trade_weekly['수입단가_USD_KG'] = trade_weekly['수입액_USD'] / trade_weekly['수입량_KG']
         
-        st.write(f"선택된 카테고리: **{', '.join(selected_categories)}**")
-        st.dataframe(filtered_trade_df.head())
+        wholesale_weekly = pd.DataFrame()
+        if not raw_wholesale_df.empty:
+            raw_wholesale_df['조사일자'] = pd.to_datetime(raw_wholesale_df['조사일자'])
+            wholesale_weekly = raw_wholesale_df.set_index('조사일자').resample('W-Mon').mean(numeric_only=True)
+            if '도매가격_원' in wholesale_weekly.columns:
+                wholesale_weekly['도매가격_USD'] = wholesale_weekly['도매가격_원'] / 1350
+                wholesale_weekly.drop(columns=['도매가격_원'], inplace=True)
+
+        search_weekly = pd.DataFrame()
+        if not raw_search_df.empty:
+            raw_search_df['날짜'] = pd.to_datetime(raw_search_df['날짜'])
+            search_weekly = raw_search_df.set_index('날짜').resample('W-Mon').mean(numeric_only=True)
+
+        news_weekly = pd.DataFrame()
+        if not raw_news_df.empty:
+            news_df_in_range = raw_news_df[(raw_news_df['Date'] >= start_date) & (raw_news_df['Date'] <= end_date)]
+            if not news_df_in_range.empty:
+                news_weekly = news_df_in_range.set_index('Date').resample('W-Mon').agg(뉴스감성점수=('Sentiment', 'mean')).copy()
         
-        st.subheader("2-2. 주(Week) 단위 데이터로 집계")
-        if not filtered_trade_df.empty:
-            filtered_trade_df.set_index('Date', inplace=True)
-            value_col, volume_col = 'Value', 'Volume'
-            
-            st.write("#### 수출입 데이터 (주별 집계)")
-            trade_weekly = filtered_trade_df.resample('W-Mon').agg({value_col: 'sum', volume_col: 'sum'})
-            trade_weekly['수입단가_USD_KG'] = trade_weekly[value_col] / trade_weekly[volume_col]
-            trade_weekly.columns = ['수입액_USD', '수입량_KG', '수입단가_USD_KG']
-            st.dataframe(trade_weekly.head())
-
-            st.write("#### 외부 가격 데이터 (주별 평균)")
-            wholesale_weekly = pd.DataFrame()
-            if not raw_wholesale_df.empty:
-                date_col = '조사일자' if '조사일자' in raw_wholesale_df.columns else '날짜'
-                raw_wholesale_df[date_col] = pd.to_datetime(raw_wholesale_df[date_col], errors='coerce')
-                wholesale_df_processed = raw_wholesale_df.set_index(date_col)
-                price_cols = [col for col in wholesale_df_processed.columns if '가격' in col]
-                agg_dict = {col: 'mean' for col in price_cols}
-                if agg_dict:
-                    wholesale_weekly = wholesale_df_processed.resample('W-Mon').agg(agg_dict)
-                    if '도매가격_원' in wholesale_weekly.columns:
-                        wholesale_weekly['도매가격_USD'] = wholesale_weekly['도매가격_원'] / 1350
-                        wholesale_weekly.drop(columns=['도매가격_원'], inplace=True)
-            st.dataframe(wholesale_weekly.head())
-            
-            st.write("#### 검색량 데이터 (주별 평균)")
-            search_weekly = pd.DataFrame()
-            if not raw_search_df.empty:
-                raw_search_df['날짜'] = pd.to_datetime(raw_search_df['날짜'], errors='coerce')
-                search_df_processed = raw_search_df.set_index('날짜')
-                numeric_cols = search_df_processed.select_dtypes(include=np.number).columns
-                search_weekly = search_df_processed.resample('W-Mon').agg({col: 'mean' for col in numeric_cols})
-            st.dataframe(search_weekly.head())
-            
-            st.session_state['trade_weekly'] = trade_weekly
-            st.session_state['wholesale_weekly'] = wholesale_weekly
-            st.session_state['search_weekly'] = search_weekly
-
-        else: 
-            st.warning("선택된 카테고리 및 기간에 해당하는 데이터가 없습니다.")
+        st.session_state['trade_weekly'] = trade_weekly
+        st.session_state['wholesale_weekly'] = wholesale_weekly
+        st.session_state['search_weekly'] = search_weekly
+        st.session_state['news_weekly'] = news_weekly
+        st.write("### 주별 집계 데이터 샘플"); st.dataframe(trade_weekly.head())
+        st.dataframe(wholesale_weekly.head()); st.dataframe(search_weekly.head()); st.dataframe(news_weekly.head())
+    else: st.warning("선택된 기간에 해당하는 수출입 데이터가 없습니다.")
 
 with tab3:
-    st.header("3. 최종 통합 데이터 및 상관관계 분석")
+    st.header("뉴스 감성 분석 결과")
+    if not raw_news_df.empty:
+        st.subheader("주별 평균 감성 점수 추이")
+        news_weekly_df = st.session_state.get('news_weekly', pd.DataFrame())
+        if not news_weekly_df.empty:
+            fig = px.line(news_weekly_df, y='뉴스감성점수', title="주별 뉴스 감성 점수")
+            fig.add_hline(y=0, line_dash="dash", line_color="red")
+            st.plotly_chart(fig, use_container_width=True)
+        st.subheader("수집된 뉴스 기사 목록 (최신순)"); st.dataframe(raw_news_df.sort_values(by='Date', ascending=False))
+    else: st.info("사이드바에서 '뉴스 기사 분석하기' 버튼을 눌러주세요.")
+
+with tab4:
+    st.header("최종 통합 데이터 및 상관관계 분석")
     trade_weekly = st.session_state.get('trade_weekly', pd.DataFrame())
     wholesale_weekly = st.session_state.get('wholesale_weekly', pd.DataFrame())
     search_weekly = st.session_state.get('search_weekly', pd.DataFrame())
+    news_weekly = st.session_state.get('news_weekly', pd.DataFrame())
 
     if not trade_weekly.empty:
-        dfs_to_concat = [df for df in [trade_weekly, wholesale_weekly, search_weekly] if not df.empty]
-        
+        dfs_to_concat = [df for df in [trade_weekly, wholesale_weekly, search_weekly, news_weekly] if not df.empty]
         final_df = reduce(lambda left, right: pd.merge(left, right, left_index=True, right_index=True, how='outer'), dfs_to_concat)
         final_df = final_df.interpolate(method='linear', limit_direction='forward').dropna(how='all')
         
-        st.subheader("최종 통합 데이터셋")
-        st.dataframe(final_df)
-        st.subheader("통합 데이터 시각화")
+        st.subheader("최종 통합 데이터셋"); st.dataframe(final_df)
         if not final_df.empty:
+            st.subheader("통합 데이터 시각화")
             fig = px.line(final_df, labels={'value': '값', 'index': '날짜', 'variable': '데이터 종류'}, title="최종 통합 데이터 시계열 추이")
             st.plotly_chart(fig, use_container_width=True)
 
-        st.markdown("---")
-        st.subheader("상관관계 분석")
-
         if len(final_df.columns) > 1:
+            st.markdown("---"); st.subheader("상관관계 분석")
             st.write("#### 상관관계 히트맵")
             corr_matrix = final_df.corr(numeric_only=True)
-            fig_heatmap = px.imshow(corr_matrix, text_auto=True, aspect="auto", 
-                                    color_continuous_scale='RdBu_r', range_color=[-1, 1],
-                                    title="전체 변수 간 상관관계 히트맵")
+            fig_heatmap = px.imshow(corr_matrix, text_auto=True, aspect="auto", color_continuous_scale='RdBu_r', range_color=[-1, 1])
             st.plotly_chart(fig_heatmap, use_container_width=True)
 
-            st.write("#### 시차별 상관관계 분석 (Cross-Correlation)")
-            
-            # --- [FIX START] 변수 선택 UI 개선 ---
+            st.write("#### 시차별 상관관계 분석")
             base_vars = [col for col in final_df.columns if '수입' in col]
             influencing_vars = [col for col in final_df.columns if '수입' not in col]
-
-            if not base_vars or not influencing_vars:
-                st.warning("상관관계를 비교하려면 '수입' 관련 변수와 '외부' 변수가 모두 필요합니다.")
-            else:
+            if base_vars and influencing_vars:
                 col1_name = st.selectbox("기준 변수 (결과) 선택", base_vars)
                 col2_name = st.selectbox("영향 변수 (원인) 선택", influencing_vars)
                 
-                max_lag = 12
-                lags = range(-max_lag, max_lag + 1)
-                
                 @st.cache_data
-                def calculate_cross_corr(df, col1, col2):
+                def calculate_cross_corr(df, col1, col2, max_lag=12):
+                    lags = range(-max_lag, max_lag + 1)
                     correlations = [df[col1].corr(df[col2].shift(lag)) for lag in lags]
                     return pd.DataFrame({'Lag (주)': lags, '상관계수': correlations})
 
                 if col1_name and col2_name:
                     cross_corr_df = calculate_cross_corr(final_df, col1_name, col2_name)
-                    
-                    fig_cross_corr = px.bar(cross_corr_df, x='Lag (주)', y='상관계수', 
-                                            title=f"'{col1_name}'와 '{col2_name}'의 시차별 상관관계",
-                                            labels={'Lag (주)': f"'{col2_name}'가 몇 주 선행/후행하는가", '상관계수': '상관계수'})
-                    fig_cross_corr.add_hline(y=0)
-                    st.plotly_chart(fig_cross_corr, use_container_width=True)
-                    
-                    st.info(
-                        f"""
-                        - **양수 Lag (+)**: **'{col2_name}'** (원인)이 '{col1_name}'(결과)보다 **나중에** 움직일 때의 상관관계를 의미합니다. (예: 수입량이 먼저 변하고, 몇 주 뒤에 가격이 따라 변하는 경향)
-                        - **음수 Lag (-)**: **'{col2_name}'** (원인)이 '{col1_name}'(결과)보다 **먼저** 움직일 때의 상관관계를 의미합니다. (예: 검색량이 먼저 증가하고, 몇 주 뒤에 수입량이 따라 증가하는 경향)
-                        - 막대가 가장 높은/낮은 지점이 두 변수 간의 영향력이 가장 큰 시차일 가능성이 높습니다.
-                        """
-                    )
-            # --- [FIX END] ---
-        else:
-            st.warning("상관관계를 분석하려면 두 개 이상의 데이터 열이 필요합니다.")
-    else: 
-        st.warning("2단계 데이터 표준화 과정에서 처리된 데이터가 없습니다. 먼저 2단계를 확인해주세요.")
+                    fig_cross_corr = px.bar(cross_corr_df, x='Lag (주)', y='상관계수', title=f"'{col1_name}'와 '{col2_name}'의 시차별 상관관계")
+                    fig_cross_corr.add_hline(y=0); st.plotly_chart(fig_cross_corr, use_container_width=True)
+                    st.info(f"""- **양수 Lag (+)**: **'{col2_name}'** (원인)이 '{col1_name}'(결과)보다 **나중에** 움직일 때의 상관관계입니다. \n- **음수 Lag (-)**: **'{col2_name}'** (원인)이 '{col1_name}'(결과)보다 **먼저** 움직일 때의 상관관계를 의미합니다.""")
+            else: st.warning("상관관계를 비교하려면 '수입' 관련 변수와 '외부' 변수가 모두 필요합니다.")
+    else: st.warning("2단계에서 처리된 데이터가 없습니다.")
 
