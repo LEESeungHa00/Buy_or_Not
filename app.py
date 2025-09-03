@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 import requests
 from datetime import datetime, timedelta
 from functools import reduce
-from pytrends.request import TrendReq
+#from pytrends.request import TrendReq
 import json
 import urllib.request
 import yfinance as yf
@@ -196,30 +196,67 @@ def call_naver_api(url, body, naver_keys):
         return json.loads(response.read().decode('utf-8'))
     return None
 
-def fetch_trends_data(keywords, start_date, end_date, naver_keys):
+
+def fetch_naver_trends_data(keywords, start_date, end_date, naver_keys):
+    """
+    네이버 데이터랩(검색어 트렌드, 쇼핑인사이트)의 데이터만 가져옵니다.
+    """
     all_data = []
-    NAVER_SHOPPING_CAT_MAP = {'커피 생두(Green Bean)': "50004457", '아보카도(열대과일)': "50002194"}
+    # 네이버 쇼핑인사이트를 위한 카테고리 ID 맵
+    NAVER_SHOPPING_CAT_MAP = {
+        '커피 생두(Green Bean)': "50004457", 
+        '아보카도': "50002194",
+        '바나나': "50002194"
+        # 필요한 품목과 카테고리 ID를 여기에 추가
+    }
+
     for keyword in keywords:
         keyword_dfs = []
-        with st.spinner(f"'{keyword}' 트렌드 데이터를 API에서 가져오는 중..."):
-            pytrends = TrendReq(hl='ko-KR', tz=540)
-            pytrends.build_payload([keyword], cat=0, timeframe=f"{start_date.strftime('%Y-%m-%d')} {end_date.strftime('%Y-%m-%d')}", geo='KR')
-            google_df = pytrends.interest_over_time()
-            if not google_df.empty and keyword in google_df.columns:
-                if 'isPartial' in google_df.columns: google_df = google_df.drop(columns=['isPartial'])
-                keyword_dfs.append(google_df.reset_index().rename(columns={'date': '날짜', keyword: f'Google_{keyword}'}))
+        with st.spinner(f"'{keyword}' 네이버 트렌드 데이터를 가져오는 중..."):
+            
+            # 네이버 API 키가 있을 경우에만 실행
             if naver_keys['id'] and naver_keys['secret']:
-                body = json.dumps({"startDate": start_date.strftime('%Y-%m-%d'), "endDate": end_date.strftime('%Y-%m-%d'), "timeUnit": "date", "keywordGroups": [{"groupName": keyword, "keywords": [keyword]}]})
-                search_res = call_naver_api("https://openapi.naver.com/v1/datalab/search", body, naver_keys)
-                if search_res: keyword_dfs.append(pd.DataFrame(search_res['results'][0]['data']).rename(columns={'period': '날짜', 'ratio': f'NaverSearch_{keyword}'}))
+                
+                # 1. 네이버 검색어 트렌드 API 호출
+                body_search = json.dumps({
+                    "startDate": start_date.strftime('%Y-%m-%d'), 
+                    "endDate": end_date.strftime('%Y-%m-%d'), 
+                    "timeUnit": "date", 
+                    "keywordGroups": [{"groupName": keyword, "keywords": [keyword]}]
+                })
+                search_res = call_naver_api("https://openapi.naver.com/v1/datalab/search", body_search, naver_keys)
+                if search_res and search_res['results']:
+                    df_search = pd.DataFrame(search_res['results'][0]['data'])
+                    keyword_dfs.append(df_search.rename(columns={'period': '날짜', 'ratio': f'NaverSearch_{keyword}'}))
+
+                # 2. 네이버 쇼핑인사이트 API 호출 (해당 키워드가 맵에 있을 경우)
                 if keyword in NAVER_SHOPPING_CAT_MAP:
-                    body_shop = json.dumps({"startDate": start_date.strftime('%Y-%m-%d'), "endDate": end_date.strftime('%Y-%m-%d'), "timeUnit": "date", "category": NAVER_SHOPPING_CAT_MAP[keyword], "keyword": keyword})
+                    category_id = NAVER_SHOPPING_CAT_MAP[keyword]
+                    body_shop = json.dumps({
+                        "startDate": start_date.strftime('%Y-%m-%d'),
+                        "endDate": end_date.strftime('%Y-%m-%d'),
+                        "timeUnit": "date",
+                        "category": category_id,
+                        "keyword": keyword
+                    })
                     shop_res = call_naver_api("https://openapi.naver.com/v1/datalab/shopping/categories", body_shop, naver_keys)
-                    if shop_res: keyword_dfs.append(pd.DataFrame(shop_res['results'][0]['data']).rename(columns={'period': '날짜', 'ratio': f'NaverShop_{keyword}'}))
+                    if shop_res and shop_res['results']:
+                        df_shop = pd.DataFrame(shop_res['results'][0]['data'])
+                        keyword_dfs.append(df_shop.rename(columns={'period': '날짜', 'ratio': f'NaverShop_{keyword}'}))
+
             if keyword_dfs:
-                for i, df in enumerate(keyword_dfs): keyword_dfs[i]['날짜'] = pd.to_datetime(df['날짜'])
-                all_data.append(reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), keyword_dfs))
-    if not all_data: return pd.DataFrame()
+                # 날짜 형식 통일 및 데이터프레임 병합
+                for i, df in enumerate(keyword_dfs):
+                    keyword_dfs[i]['날짜'] = pd.to_datetime(df['날짜'])
+                
+                # reduce를 사용하여 모든 keyword_dfs 데이터프레임을 병합
+                merged_df = reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), keyword_dfs)
+                all_data.append(merged_df)
+
+    if not all_data: 
+        return pd.DataFrame()
+
+    # 모든 키워드에 대한 데이터프레임을 최종적으로 병합
     return reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), all_data)
 
 def fetch_kamis_data(client, item_info, start_date, end_date, kamis_keys):
@@ -398,9 +435,16 @@ st.sidebar.markdown("##### 트렌드 데이터")
 naver_client_id = st.sidebar.text_input("Naver API Client ID", type="password")
 naver_client_secret = st.sidebar.text_input("Naver API Client Secret", type="password")
 if st.sidebar.button("트렌드 데이터 가져오기"):
-    if not search_keywords: st.sidebar.warning("검색어를 먼저 입력해주세요.")
+    if not search_keywords: 
+        st.sidebar.warning("검색어를 먼저 입력해주세요.")
     else:
-        st.session_state.search_data = fetch_trends_data(search_keywords, start_date, end_date, {'id': naver_client_id, 'secret': naver_client_secret})
+        # [수정] 새 함수를 호출하도록 변경
+        st.session_state.search_data = fetch_naver_trends_data(
+            search_keywords, 
+            start_date, 
+            end_date, 
+            {'id': naver_client_id, 'secret': naver_client_secret}
+        )
         # [수정] st.rerun() 제거
 st.sidebar.markdown("##### 뉴스 감성 분석")
 if st.sidebar.button("최신 뉴스 분석하기 (RSS)"):
