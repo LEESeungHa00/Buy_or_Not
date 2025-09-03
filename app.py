@@ -121,11 +121,14 @@ def fetch_historical_news(client, keywords, start_date, end_date, models):
                     try:
                         article.download(); article.parse()
                         pub_date = article.publish_date
-                        if pub_date and start_date <= pub_date.replace(tzinfo=None) <= end_date:
-                            model = models[lang]
-                            analysis = model(article.title[:256])[0]
-                            score = analysis['score'] if analysis['label'].lower() in ['positive', '5 stars'] else -analysis['score']
-                            keyword_articles.append({'Date': pub_date.date(), 'Title': article.title, 'Sentiment': score, 'Keyword': keyword, 'Language': lang})
+                        if pub_date:
+                            # --- [FIX] 날짜 형식을 pd.Timestamp로 통일하여 비교 ---
+                            pub_date_ts = pd.to_datetime(pub_date).tz_localize(None)
+                            if start_date <= pub_date_ts <= end_date:
+                                model = models[lang]
+                                analysis = model(article.title[:256])[0]
+                                score = analysis['score'] if analysis['label'].lower() in ['positive', '5 stars'] else -analysis['score']
+                                keyword_articles.append({'Date': pub_date.date(), 'Title': article.title, 'Sentiment': score, 'Keyword': keyword, 'Language': lang})
                     except Exception: continue
                 if keyword_articles: all_news_data.append(pd.DataFrame(keyword_articles))
     
@@ -181,10 +184,8 @@ def fetch_trends_data(keywords, start_date, end_date, naver_keys):
             pytrends.build_payload([keyword], cat=0, timeframe=timeframe, geo='KR', gprop='')
             google_df = pytrends.interest_over_time()
             if not google_df.empty and keyword in google_df.columns:
-                # --- [FIX START] isPartial 컬럼을 미리 제거하여 병합 오류 방지 ---
                 if 'isPartial' in google_df.columns:
                     google_df = google_df.drop(columns=['isPartial'])
-                # --- [FIX END] ---
                 google_df_renamed = google_df.reset_index().rename(columns={'date': '날짜', keyword: f'Google_{keyword}'})
                 keyword_dfs.append(google_df_renamed)
 
