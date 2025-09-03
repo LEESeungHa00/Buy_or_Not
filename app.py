@@ -197,66 +197,87 @@ def call_naver_api(url, body, naver_keys):
     return None
 
 
+
 def fetch_naver_trends_data(keywords, start_date, end_date, naver_keys):
     """
-    네이버 데이터랩(검색어 트렌드, 쇼핑인사이트)의 데이터만 가져옵니다.
+    네이버 데이터랩(검색어 트렌드, 쇼핑인사이트)의 데이터를 가져옵니다.
+    키워드에 따라 자동으로 쇼핑인사이트 카테고리 ID를 매칭합니다.
     """
-    all_data = []
-    # 네이버 쇼핑인사이트를 위한 카테고리 ID 맵
+    if (end_date - start_date).days > 90:
+        st.sidebar.error("조회 기간은 최대 3개월(90일)을 넘을 수 없습니다.")
+        return pd.DataFrame()
+
+    # [수정] 네이버 쇼핑인사이트 카테고리 ID 맵 확장
+    # 키워드를 소문자로 관리하여 대소문자 구분 없이 매칭되도록 함
     NAVER_SHOPPING_CAT_MAP = {
-        '커피 생두(Green Bean)': "50004457", 
-        '아보카도': "50002194",
-        '바나나': "50002194"
-        # 필요한 품목과 카테고리 ID를 여기에 추가
+        # '카테고리명': '카테고리 ID'
+        "식품": "50000006",
+        "과일": "50000007",
+        
+        # '키워드': '카-테고리 ID'
+        # 과일류 (하위 카테고리 ID 대신 대표 ID 사용 가능)
+        '아보카도': "50000007", # 과일
+        '바나나': "50000007",   # 과일
+        '사과': "50000007",     # 과일
+        '수입과일': "50000007", # 과일
+        
+        # 커피/차류
+        '커피': "50000004",
+        '커피 생두': "50000004",
+        
+        # 기타 식품
+        '쌀': "50000006",      # 식품
+        '고등어': "50000009"  # 수산물/건어물
     }
+
+    all_data = []
 
     for keyword in keywords:
         keyword_dfs = []
         with st.spinner(f"'{keyword}' 네이버 트렌드 데이터를 가져오는 중..."):
-            
-            # 네이버 API 키가 있을 경우에만 실행
             if naver_keys['id'] and naver_keys['secret']:
                 
-                # 1. 네이버 검색어 트렌드 API 호출
+                # 1. (공통) 네이버 검색어 트렌드 API 호출
                 body_search = json.dumps({
-                    "startDate": start_date.strftime('%Y-%m-%d'), 
-                    "endDate": end_date.strftime('%Y-%m-%d'), 
+                    "startDate": start_date.strftime('%Y-m-d'), 
+                    "endDate": end_date.strftime('%Y-m-d'), 
                     "timeUnit": "date", 
                     "keywordGroups": [{"groupName": keyword, "keywords": [keyword]}]
                 })
                 search_res = call_naver_api("https://openapi.naver.com/v1/datalab/search", body_search, naver_keys)
-                if search_res and search_res['results']:
+                if search_res and search_res.get('results'):
                     df_search = pd.DataFrame(search_res['results'][0]['data'])
                     keyword_dfs.append(df_search.rename(columns={'period': '날짜', 'ratio': f'NaverSearch_{keyword}'}))
 
-                # 2. 네이버 쇼핑인사이트 API 호출 (해당 키워드가 맵에 있을 경우)
-                if keyword in NAVER_SHOPPING_CAT_MAP:
-                    category_id = NAVER_SHOPPING_CAT_MAP[keyword]
+                # 2. 네이버 쇼핑인사이트 API 호출 (키워드가 맵에 있을 경우)
+                # 입력된 키워드를 소문자로 변환하여 맵에서 찾음
+                lower_keyword = keyword.lower()
+                if lower_keyword in NAVER_SHOPPING_CAT_MAP:
+                    category_id = NAVER_SHOPPING_CAT_MAP[lower_keyword]
                     body_shop = json.dumps({
-                        "startDate": start_date.strftime('%Y-%m-%d'),
-                        "endDate": end_date.strftime('%Y-%m-%d'),
+                        "startDate": start_date.strftime('%Y-m-d'),
+                        "endDate": end_date.strftime('%Y-m-d'),
                         "timeUnit": "date",
                         "category": category_id,
-                        "keyword": keyword
+                        "keyword": keyword # API에는 원본 키워드 전달
                     })
                     shop_res = call_naver_api("https://openapi.naver.com/v1/datalab/shopping/categories", body_shop, naver_keys)
-                    if shop_res and shop_res['results']:
+                    if shop_res and shop_res.get('results'):
                         df_shop = pd.DataFrame(shop_res['results'][0]['data'])
                         keyword_dfs.append(df_shop.rename(columns={'period': '날짜', 'ratio': f'NaverShop_{keyword}'}))
+                else:
+                    st.sidebar.info(f"'{keyword}'에 대한 쇼핑인사이트 카테고리 정보가 없어 검색 트렌드만 조회합니다.")
+
 
             if keyword_dfs:
-                # 날짜 형식 통일 및 데이터프레임 병합
                 for i, df in enumerate(keyword_dfs):
                     keyword_dfs[i]['날짜'] = pd.to_datetime(df['날짜'])
-                
-                # reduce를 사용하여 모든 keyword_dfs 데이터프레임을 병합
                 merged_df = reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), keyword_dfs)
                 all_data.append(merged_df)
 
     if not all_data: 
         return pd.DataFrame()
-
-    # 모든 키워드에 대한 데이터프레임을 최종적으로 병합
+        
     return reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), all_data)
 
 def fetch_kamis_data(client, item_info, start_date, end_date, kamis_keys):
