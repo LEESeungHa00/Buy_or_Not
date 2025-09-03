@@ -112,13 +112,13 @@ def fetch_and_analyze_news(client, keywords, start_date, end_date, model):
                 st.sidebar.info(f"'{keyword}' 뉴스 데이터를 BigQuery 캐시에서 로드했습니다.")
                 all_news_data.append(df_cache)
                 continue
-        except Exception: pass
+        except Exception: pass # Cache table might not exist yet
 
         with st.spinner(f"'{keyword}' 관련 뉴스를 크롤링하고 분석하는 중..."):
             news_url = f"https://news.google.com/search?q={keyword}&hl=ko&gl=KR&ceid=KR%3Ako"
             paper = build(news_url, memoize_articles=False, language='ko')
             keyword_articles = []
-            for article in paper.articles[:25]:
+            for article in paper.articles[:25]: # Limit articles for speed
                 try:
                     article.download(); article.parse()
                     pub_date = article.publish_date
@@ -396,13 +396,17 @@ with tab4:
 
     if not trade_weekly.empty:
         dfs_to_concat = [df for df in [trade_weekly, wholesale_weekly, search_weekly, news_weekly] if not df.empty]
+        # --- [FIX] Use pd.concat for robust merging ---
         final_df = pd.concat(dfs_to_concat, axis=1)
         final_df = final_df.interpolate(method='linear', limit_direction='forward').dropna(how='all')
         
         st.subheader("최종 통합 데이터셋"); st.dataframe(final_df)
         if not final_df.empty:
             st.subheader("통합 데이터 시각화")
-            fig = px.line(final_df, labels={'value': '값', 'index': '날짜', 'variable': '데이터 종류'}, title="최종 통합 데이터 시계열 추이")
+            # --- [FIX] Plotting with reset_index for stability ---
+            df_to_plot = final_df.reset_index().rename(columns={'index': '날짜'})
+            fig = px.line(df_to_plot, x='날짜', y=df_to_plot.columns[1:],
+                          labels={'value': '값', 'variable': '데이터 종류'}, title="최종 통합 데이터 시계열 추이")
             st.plotly_chart(fig, use_container_width=True)
 
         if len(final_df.columns) > 1:
