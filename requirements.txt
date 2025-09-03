@@ -9,6 +9,7 @@ google-cloud-bigquery
 pandas-gbq
 openpyxl
 newspaper3k
+lxml[html_clean]
 transformers
 torch
 sentencepiece
