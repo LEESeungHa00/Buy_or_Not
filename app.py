@@ -213,16 +213,29 @@ def fetch_trends_data(keywords, start_date, end_date, naver_keys):
     if not all_data: return pd.DataFrame()
     return reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), all_data)
 
-def fetch_kamis_data(item_info, start_date, end_date, kamis_keys):
+def fetch_kamis_data(client, item_info, start_date, end_date, kamis_keys):
+    """KAMIS 데이터를 조회하며, BigQuery 캐시를 우선적으로 확인합니다."""
+    project_id = client.project; table_name = "kamis_cache"
+    table_id = f"{project_id}.data_explorer.{table_name}"
+    item_code = item_info['item_code']
+    
+    try: # Check cache first
+        sql = f"SELECT Date AS 조사일자, Price AS 도매가격_원 FROM `{table_id}` WHERE ItemCode = '{item_code}' AND Date >= '{start_date.strftime('%Y-%m-%d')}' AND Date <= '{end_date.strftime('%Y-%m-%d')}'"
+        df_cache = client.query(sql).to_dataframe()
+        if len(df_cache) >= (end_date - start_date).days * 0.8:
+            st.sidebar.info(f"'{item_info['item_name']}' KAMIS 데이터를 BigQuery 캐시에서 로드했습니다.")
+            return df_cache
+    except Exception: pass
+
     all_data = []
     date_range = pd.date_range(start=start_date, end=end_date)
     if len(date_range) > 180: st.sidebar.warning(f"KAMIS 조회 기간이 {len(date_range)}일로 깁니다. 오래 걸릴 수 있습니다.")
-    progress_bar = st.sidebar.progress(0, text="KAMIS 데이터 조회 중...")
+    progress_bar = st.sidebar.progress(0, text="KAMIS 데이터 API 조회 중...")
     
     for i, date in enumerate(date_range):
         date_str = date.strftime('%Y-%m-%d')
         url = (f"http://www.kamis.or.kr/service/price/xml.do?p_product_cls_code=02&p_item_category_code={item_info['cat_code']}"
-               f"&p_item_code={item_info['item_code']}&p_regday={date_str}&p_convert_kg_yn=Y"
+               f"&p_item_code={item_code}&p_regday={date_str}&p_convert_kg_yn=Y"
                f"&p_cert_key={kamis_keys['key']}&p_cert_id={kamis_keys['id']}&p_returntype=json")
         try:
             response = requests.get(url, timeout=10)
@@ -232,14 +245,17 @@ def fetch_kamis_data(item_info, start_date, end_date, kamis_keys):
                 if items:
                     price_str = items[0].get('dpr1', '0').replace(',', '')
                     if price_str.isdigit() and int(price_str) > 0:
-                        all_data.append({'조사일자': date, '도매가격_원': int(price_str)})
+                        all_data.append({'Date': date, 'Price': int(price_str), 'ItemCode': item_code})
         except Exception: continue
-        finally: progress_bar.progress((i + 1) / len(date_range), text=f"KAMIS 데이터 조회 중... {date_str}")
+        finally: progress_bar.progress((i + 1) / len(date_range))
     
     progress_bar.empty()
     if not all_data: st.sidebar.warning("해당 기간에 대한 KAMIS 데이터가 없습니다."); return pd.DataFrame()
-    df = pd.DataFrame(all_data)
-    return df
+    
+    df_new = pd.DataFrame(all_data)
+    deduplicate_and_write_to_bq(client, df_new, table_name)
+    return df_new.rename(columns={'Date': '조사일자', 'Price': '도매가격_원'})
+
 
 # --- Constants & App ---
 COFFEE_TICKERS_YFINANCE = {"미국 커피 C": "KC=F", "런던 로부스타": "RC=F"}
@@ -285,17 +301,12 @@ with st.sidebar.expander("➕ 새 수출입 데이터 추가"):
         if st.button("업로드 파일 BigQuery에 저장"):
             try:
                 df_new = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
-                
-                # --- [FIX START] 데이터 클렌징 로직 추가 ---
-                numeric_cols = ['Value', 'Volume', 'Unit_Price', 'UnitPrice'] # 예상되는 숫자 컬럼 이름
+                numeric_cols = ['Value', 'Volume', 'Unit_Price', 'UnitPrice']
                 for col in numeric_cols:
                     if col in df_new.columns:
                         df_new[col] = pd.to_numeric(df_new[col], errors='coerce')
-                
                 if 'Date' in df_new.columns:
                     df_new['Date'] = pd.to_datetime(df_new['Date'], errors='coerce')
-                # --- [FIX END] ---
-
                 add_trade_data_to_bq(bq_client, df_new)
                 st.session_state.clear()
                 st.rerun()
@@ -348,8 +359,8 @@ else:
         item_name = st.sidebar.selectbox("세부 품목 선택", list(KAMIS_ITEMS[cat_name].keys()))
         if st.sidebar.button("KAMIS 데이터 가져오기"):
             if kamis_api_key and kamis_api_id:
-                item_info = {'item_code': KAMIS_ITEMS[cat_name][item_name], 'cat_code': KAMIS_CATEGORIES[cat_name]}
-                df = fetch_kamis_data(item_info, start_date, end_date, {'key': kamis_api_key, 'id': kamis_api_id})
+                item_info = {'item_name': item_name, 'item_code': KAMIS_ITEMS[cat_name][item_name], 'cat_code': KAMIS_CATEGORIES[cat_name]}
+                df = fetch_kamis_data(bq_client, item_info, start_date, end_date, {'key': kamis_api_key, 'id': kamis_api_id})
                 st.session_state['wholesale_data'] = df
                 st.rerun()
             else: st.sidebar.error("KAMIS API Key와 ID를 모두 입력해주세요.")
