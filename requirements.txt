@@ -7,6 +7,7 @@ requests
 yfinance
 google-auth
 google-cloud-bigquery
+google-cloud-bigquery-storage
 pandas-gbq
 newspaper3k
 transformers
