@@ -9,20 +9,21 @@ from functools import reduce
 import json
 import urllib.request
 from google.oauth2 import service_account
-from google.cloud import bigquery, language_v1
+from google.cloud import bigquery
 import pandas_gbq
 import feedparser
 from urllib.parse import quote
 from statsmodels.tsa.seasonal import seasonal_decompose
 from prophet import Prophet
 from prophet.plot import plot_plotly
+from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
 
 # ==============================================================================
 # --- 1. Constants and Configuration ---
 # ==============================================================================
 BQ_DATASET = "data_explorer"
 BQ_TABLE_NAVER = "naver_trends_cache"
-BQ_TABLE_NEWS = "news_sentiment_google_nlp" # 새 테이블 이름
+BQ_TABLE_NEWS = "news_sentiment_finbert" # KR-FinBERT용 새 테이블 이름
 
 KAMIS_FULL_DATA = {
     '쌀': {'cat_code': '100', 'item_code': '111', 'kinds': {'20kg': '01', '백미': '02'}},
@@ -51,20 +52,8 @@ def get_bq_connection():
         st.error(f"Google BigQuery 연결 실패: secrets.toml을 확인하세요. 오류: {e}")
         return None
 
-@st.cache_resource
-def get_gcp_nlp_client():
-    """Google Cloud Natural Language API 클라이언트를 반환합니다."""
-    try:
-        creds_dict = st.secrets["gcp_service_account"]
-        creds = service_account.Credentials.from_service_account_info(creds_dict)
-        nlp_client = language_v1.LanguageServiceClient(credentials=creds)
-        return nlp_client
-    except Exception as e:
-        st.error(f"Google NLP 연결 실패: {e}")
-        return None
-
 def ensure_news_table_exists(client):
-    """새로운 뉴스 분석 결과에 맞는 스키마로 BigQuery 테이블이 있는지 확인하고 없으면 생성합니다."""
+    """뉴스 분석 결과 저장을 위한 BigQuery 테이블이 있는지 확인하고 없으면 생성합니다."""
     project_id = client.project
     full_table_id = f"{project_id}.{BQ_DATASET}.{BQ_TABLE_NEWS}"
     try:
@@ -76,7 +65,7 @@ def ensure_news_table_exists(client):
             bigquery.SchemaField("Title", "STRING"),
             bigquery.SchemaField("Keyword", "STRING"),
             bigquery.SchemaField("Sentiment", "FLOAT"),
-            bigquery.SchemaField("Magnitude", "FLOAT"),
+            bigquery.SchemaField("Label", "STRING"),
             bigquery.SchemaField("InsertedAt", "TIMESTAMP"),
         ]
         table = bigquery.Table(full_table_id, schema=schema)
@@ -99,25 +88,119 @@ def call_naver_api(url, body, naver_keys):
         return None
 
 # ==============================================================================
-# --- 3. Main Data Fetching Functions ---
+# --- 3. KR-FinBERT Sentiment Analysis Functions ---
 # ==============================================================================
+
+@st.cache_resource
+def load_kr_finbert_model():
+    """서울대 KR-FinBERT 모델과 토크나이저를 로드합니다. 리소스 사용량이 매우 큽니다."""
+    try:
+        with st.spinner("KR-FinBERT 금융 분석 모델을 로드 중입니다 (최초 실행 시 몇 분 소요)..."):
+            model_name = "snunlp/KR-FinBERT-SC"
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            model = AutoModelForSequenceClassification.from_pretrained(model_name)
+            sentiment_classifier = pipeline("sentiment-analysis", model=model, tokenizer=tokenizer)
+        return sentiment_classifier
+    except Exception as e:
+        st.error(f"KR-FinBERT 모델 로드 실패: {e}")
+        return None
+
+def analyze_sentiment_with_finbert(texts, classifier):
+    """주어진 텍스트 리스트의 감성을 KR-FinBERT 모델로 분석합니다."""
+    if not texts or not classifier:
+        return []
+    
+    results = []
+    predictions = classifier(texts)
+    
+    for text, pred in zip(texts, predictions):
+        score = pred['score']
+        label = pred['label']
+        # 모델 결과에 따라 점수를 긍정(양수)/부정(음수)/중립(0)으로 변환
+        if label == 'negative':
+            score = -score
+        elif label == 'neutral':
+            score = 0.0
+        
+        results.append({'score': score, 'label': label})
+        
+    return results
+
+def get_news_with_finbert_analysis(_bq_client, classifier, keyword, days_limit=7):
+    """뉴스를 수집하고 KR-FinBERT로 분석 후, BigQuery에 캐싱하는 함수."""
+    project_id = _bq_client.project
+    full_table_id = f"{project_id}.{BQ_DATASET}.{BQ_TABLE_NEWS}"
+
+    # 1. BigQuery에서 최신 캐시 확인
+    try:
+        time_limit = datetime.now(timezone.utc) - timedelta(days=days_limit)
+        query = f"SELECT * FROM `{full_table_id}` WHERE Keyword = @keyword AND InsertedAt >= @time_limit ORDER BY 날짜 DESC"
+        job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("keyword", "STRING", keyword), bigquery.ScalarQueryParameter("time_limit", "TIMESTAMP", time_limit)])
+        df_cache = _bq_client.query(query, job_config=job_config).to_dataframe()
+    except Exception:
+        df_cache = pd.DataFrame()
+
+    if not df_cache.empty:
+        st.sidebar.success(f"✔️ '{keyword}' 최신 분석 결과를 캐시에서 로드했습니다.")
+        return df_cache
+
+    # 2. 캐시 없으면 새로 수집 및 분석
+    st.sidebar.warning(f"'{keyword}'에 대한 최신 캐시가 없습니다. 새로 분석합니다...")
+    
+    all_news = []
+    rss_url = f"https://news.google.com/rss/search?q={quote(keyword)}&hl=ko&gl=KR&ceid=KR:ko"
+    feed = feedparser.parse(rss_url)
+    
+    for entry in feed.entries[:20]:
+        title = entry.get('title', '')
+        if not title: continue
+        try:
+            pub_date = pd.to_datetime(entry.get('published')).date()
+            all_news.append({"날짜": pub_date, "Title": title})
+        except:
+            continue
+    
+    if not all_news:
+        st.error(f"'{keyword}'에 대한 뉴스를 찾지 못했습니다.")
+        return pd.DataFrame()
+
+    df_new = pd.DataFrame(all_news).drop_duplicates(subset=["Title"])
+
+    # KR-FinBERT 모델로 감성 분석 실행
+    with st.spinner(f"KR-FinBERT 모델로 '{keyword}' 뉴스 감성 분석 중..."):
+        analysis_results = analyze_sentiment_with_finbert(df_new['Title'].tolist(), classifier)
+    
+    df_new['Sentiment'] = [res['score'] for res in analysis_results]
+    df_new['Label'] = [res['label'] for res in analysis_results]
+    df_new['Keyword'] = keyword
+    df_new['InsertedAt'] = datetime.now(timezone.utc)
+    
+    # 3. BigQuery에 새 결과 저장
+    if not df_new.empty:
+        st.sidebar.info("새 분석 결과를 BigQuery 캐시에 저장합니다.")
+        df_to_gbq = df_new[["날짜", "Title", "Keyword", "Sentiment", "Label", "InsertedAt"]]
+        pandas_gbq.to_gbq(df_to_gbq, full_table_id, project_id=project_id, if_exists="append", credentials=_bq_client._credentials)
+    
+    return df_to_gbq
+
+# ==============================================================================
+# --- 4. Other Data Fetching Functions ---
+# ==============================================================================
+
 @st.cache_data(ttl=3600)
 def get_categories_from_bq(_client):
     """BigQuery에서 분석 가능한 품목 카테고리 목록을 가져옵니다."""
     project_id = _client.project
     table_id = f"{project_id}.{BQ_DATASET}.tds_data"
     try:
-        with st.spinner("BigQuery에서 카테고리 목록 불러오는 중..."):
-            query = f"SELECT DISTINCT Category FROM `{table_id}` WHERE Category IS NOT NULL ORDER BY Category"
-            df = _client.query(query).to_dataframe()
+        query = f"SELECT DISTINCT Category FROM `{table_id}` WHERE Category IS NOT NULL ORDER BY Category"
+        df = _client.query(query).to_dataframe()
         return sorted(df['Category'].astype(str).unique())
-    except Exception as e:
-        st.error(f"BigQuery 테이블({table_id})을 읽는 중 오류: {e}")
+    except Exception:
         return []
-        
+
 def get_trade_data_from_bq(client, categories):
     """선택된 카테고리에 대한 수출입 데이터를 BigQuery에서 가져옵니다."""
-    # (이하 함수 내용은 이전과 동일)
     if not categories: return pd.DataFrame()
     project_id = client.project
     table_id = f"{project_id}.{BQ_DATASET}.tds_data"
@@ -139,7 +222,6 @@ def get_trade_data_from_bq(client, categories):
 @st.cache_data(ttl=3600)
 def fetch_naver_trends_data(_client, keywords, start_date, end_date, naver_keys):
     """BigQuery 캐시를 활용하여 네이버 데이터랩 데이터를 긴 기간에 대해 가져옵니다."""
-    # (이하 함수 내용은 이전과 동일)
     project_id = _client.project
     table_id = f"{project_id}.{BQ_DATASET}.{BQ_TABLE_NAVER}"
 
@@ -169,8 +251,7 @@ def fetch_naver_trends_data(_client, keywords, start_date, end_date, naver_keys)
             if current_end > end_date:
                 current_end = end_date
             
-            # (이하 API 호출 로직은 이전과 동일)
-            NAVER_SHOPPING_CAT_MAP = {'아보카도': "50000007", '바나나': "50000007", '사과': "50000007"}
+            NAVER_SHOPPING_CAT_MAP = {'아보카도':"50000007", '바나나':"50000007", '사과':"50000007", '커피': "50000004", '쌀': "50000006", '고등어': "50000009"}
             all_data_chunk = []
             for keyword in keywords:
                 keyword_dfs = []
@@ -180,9 +261,10 @@ def fetch_naver_trends_data(_client, keywords, start_date, end_date, naver_keys)
                     df_search = pd.DataFrame(search_res['results'][0]['data'])
                     if not df_search.empty: keyword_dfs.append(df_search.rename(columns={'period': '날짜', 'ratio': f'NaverSearch_{keyword}'}))
                 
-                if keyword.lower().replace(' ', '') in NAVER_SHOPPING_CAT_MAP:
-                    category_id = NAVER_SHOPPING_CAT_MAP[keyword.lower().replace(' ', '')]
-                    body_shop = json.dumps({"startDate": current_start.strftime('%Y-%m-%d'),"endDate": current_end.strftime('%Y-%m-%d'), "timeUnit": "date", "category": [{"name": keyword, "param": [category_id]}], "keyword": [{"name": keyword, "param": [keyword]}]})
+                norm_keyword = keyword.lower().replace(' ', '')
+                if norm_keyword in NAVER_SHOPPING_CAT_MAP:
+                    cat_id = NAVER_SHOPPING_CAT_MAP[norm_keyword]
+                    body_shop = json.dumps({"startDate": current_start.strftime('%Y-%m-%d'),"endDate": current_end.strftime('%Y-%m-%d'), "timeUnit": "date", "category": [{"name": keyword, "param": [cat_id]}], "keyword": [{"name": keyword, "param": [keyword]}]})
                     shop_res = call_naver_api("https://openapi.naver.com/v1/datalab/shopping/categories", body_shop, naver_keys)
                     if shop_res and shop_res.get('results') and shop_res['results'][0]['data']:
                         df_shop = pd.DataFrame(shop_res['results'][0]['data'])
@@ -190,8 +272,7 @@ def fetch_naver_trends_data(_client, keywords, start_date, end_date, naver_keys)
                 
                 if keyword_dfs:
                     for df in keyword_dfs: df['날짜'] = pd.to_datetime(df['날짜'])
-                    merged_df = reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), keyword_dfs)
-                    all_data_chunk.append(merged_df)
+                    all_data_chunk.append(reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), keyword_dfs))
             
             if all_data_chunk:
                 new_data_list.append(reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), all_data_chunk))
@@ -215,14 +296,12 @@ def fetch_naver_trends_data(_client, keywords, start_date, end_date, naver_keys)
     if df_final.empty: return pd.DataFrame()
     return df_final[(df_final['날짜'] >= start_date) & (df_final['날짜'] <= end_date)].reset_index(drop=True)
 
-def fetch_kamis_data(client, item_info, start_date, end_date, kamis_keys):
+def fetch_kamis_data(_client, item_info, start_date, end_date, kamis_keys):
     """KAMIS에서 기간별 도매 가격 데이터를 가져옵니다."""
-    # (이하 함수 내용은 이전과 동일)
     start_str, end_str = start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')
-    item_code, kind_code = item_info['item_code'], item_info['kind_code']
     url = (f"http://www.kamis.or.kr/service/price/xml.do?action=periodWholesaleProductList"
            f"&p_product_cls_code=01&p_startday={start_str}&p_endday={end_str}"
-           f"&p_item_category_code={item_info['cat_code']}&p_item_code={item_code}&p_kind_code={kind_code}"
+           f"&p_item_category_code={item_info['cat_code']}&p_item_code={item_info['item_code']}&p_kind_code={item_info['kind_code']}"
            f"&p_product_rank_code={item_info['rank_code']}&p_convert_kg_yn=Y"
            f"&p_cert_key={kamis_keys['key']}&p_cert_id={kamis_keys['id']}&p_returntype=json")
     try:
@@ -231,99 +310,49 @@ def fetch_kamis_data(client, item_info, start_date, end_date, kamis_keys):
             price_data = response.json()["data"]["item"]
             if not price_data: return pd.DataFrame()
             df_new = pd.DataFrame(price_data)[['regday', 'price']].rename(columns={'regday': '날짜', 'price': '도매가격_원'})
-            df_new['날짜'] = pd.to_datetime(df_new['날짜'])
+            
+            def format_kamis_date(date_str):
+                processed_str = date_str.replace('/', '-')
+                if processed_str.count('-') == 1:
+                    return f"{start_date.year}-{processed_str}"
+                return processed_str
+            
+            df_new['날짜'] = pd.to_datetime(df_new['날짜'].apply(format_kamis_date))
             df_new['도매가격_원'] = pd.to_numeric(df_new['도매가격_원'].str.replace(',', ''), errors='coerce')
             return df_new
     except Exception as e:
         st.sidebar.error(f"KAMIS API 호출 중 오류: {e}")
     return pd.DataFrame()
 
-def fetch_and_analyze_news_lightweight(_bq_client, _nlp_client, keyword, days_limit=7):
-    """뉴스를 수집하고 Google NLP로 분석 후, BigQuery에 캐싱하는 경량화된 함수."""
-    # (이하 함수 내용은 이전과 동일)
-    project_id = _bq_client.project
-    full_table_id = f"{project_id}.{BQ_DATASET}.{BQ_TABLE_NEWS}"
-
-    try:
-        time_limit = datetime.now(timezone.utc) - timedelta(days=days_limit)
-        query = f"SELECT * FROM `{full_table_id}` WHERE Keyword = @keyword AND InsertedAt >= @time_limit ORDER BY 날짜 DESC"
-        job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("keyword", "STRING", keyword), bigquery.ScalarQueryParameter("time_limit", "TIMESTAMP", time_limit)])
-        df_cache = _bq_client.query(query, job_config=job_config).to_dataframe()
-    except Exception:
-        df_cache = pd.DataFrame()
-
-    if not df_cache.empty:
-        st.sidebar.success(f"✔️ '{keyword}' 최신 뉴스 결과를 캐시에서 로드했습니다.")
-        return df_cache
-
-    st.sidebar.warning(f"'{keyword}'에 대한 최신 캐시가 없습니다. 새로 분석합니다.")
-    all_news = []
-    rss_url = f"https://news.google.com/rss/search?q={quote(keyword)}&hl=ko&gl=KR&ceid=KR:ko"
-    feed = feedparser.parse(rss_url)
-    
-    for entry in feed.entries[:20]:
-        title = entry.get('title', '')
-        if not title: continue
-        try:
-            pub_date = pd.to_datetime(entry.get('published')).date()
-            all_news.append({"날짜": pub_date, "Title": title})
-        except: continue
-    
-    if not all_news: return pd.DataFrame()
-
-    df_new = pd.DataFrame(all_news).drop_duplicates(subset=["Title"])
-    
-    def analyze_sentiment_with_google(text_content, nlp_client):
-        if not text_content or not nlp_client: return 0.0, 0.0
-        document = language_v1.Document(content=text_content, type_=language_v1.Document.Type.PLAIN_TEXT)
-        response = nlp_client.analyze_sentiment(request={'document': document})
-        return response.document_sentiment.score, response.document_sentiment.magnitude
-
-    sentiments = [analyze_sentiment_with_google(title, _nlp_client) for title in df_new['Title']]
-    df_new['Sentiment'] = [s[0] for s in sentiments]
-    df_new['Magnitude'] = [s[1] for s in sentiments]
-    df_new['Keyword'] = keyword
-    df_new['InsertedAt'] = datetime.now(timezone.utc)
-    
-    if not df_new.empty:
-        df_to_gbq = df_new[["날짜", "Title", "Keyword", "Sentiment", "Magnitude", "InsertedAt"]]
-        pandas_gbq.to_gbq(df_to_gbq, full_table_id, project_id=project_id, if_exists="append", credentials=_bq_client._credentials)
-    
-    return df_to_gbq
-
 # ==============================================================================
-# --- 4. Streamlit App Main Logic ---
+# --- 5. Streamlit App UI and Main Logic ---
 # ==============================================================================
 
 st.set_page_config(layout="wide")
-st.title("📊 데이터 탐색 및 통합 분석 대시보드")
+st.title("📊 데이터 탐색 및 통합 분석 대시보드 (KR-FinBERT)")
 
-# --- Initialize GCP Clients ---
+# --- Initialize Connections and Models ---
 bq_client = get_bq_connection()
-nlp_client = get_gcp_nlp_client()
-if bq_client is None or nlp_client is None:
+classifier = load_kr_finbert_model() # KR-FinBERT 모델 로드
+if bq_client is None or classifier is None:
+    st.error("GCP 또는 AI 모델 초기화에 실패했습니다. 앱을 재시작해주세요.")
     st.stop()
 
-# --- Initialize News Table in BigQuery ---
 ensure_news_table_exists(bq_client)
 
-# --- Initialize Session State ---
 if 'data_loaded' not in st.session_state:
     st.session_state.data_loaded = False
 
 # --- Sidebar UI ---
 st.sidebar.header("⚙️ 분석 설정")
 
-# 1. Select Main Data
 st.sidebar.subheader("1. 분석 대상 품목 선택")
 categories = get_categories_from_bq(bq_client)
 if not categories:
     st.sidebar.warning("BigQuery에 분석할 데이터가 없습니다.")
 else:
-    selected_categories = st.sidebar.multiselect(
-        "분석할 품목 카테고리 선택", categories, default=st.session_state.get('selected_categories', [])
-    )
-    if st.sidebar.button("🚀 선택 품목 데이터 불러오기"):
+    selected_categories = st.sidebar.multiselect("분석할 품목 선택", categories, default=st.session_state.get('selected_categories', []))
+    if st.sidebar.button("🚀 선택 품목 데이터 불러오기", key="load_trade"):
         if not selected_categories:
             st.sidebar.warning("카테고리를 선택해주세요.")
         else:
@@ -332,21 +361,18 @@ else:
                 st.session_state.raw_trade_df = df
                 st.session_state.data_loaded = True
                 st.session_state.selected_categories = selected_categories
-                st.rerun() # Reload to update the main page
+                st.rerun()
             else:
                 st.sidebar.error("데이터를 불러오지 못했습니다.")
 
-# Stop if main data is not loaded yet
 if not st.session_state.data_loaded:
     st.info("👈 사이드바에서 분석할 카테고리를 선택하고 버튼을 눌러주세요.")
     st.stop()
 
-# --- Main App Logic continues only if data is loaded ---
 raw_trade_df = st.session_state.raw_trade_df
 st.sidebar.success(f"**{', '.join(st.session_state.selected_categories)}** 데이터 로드 완료!")
 st.sidebar.markdown("---")
 
-# 2. Set Date Range & Keywords
 st.sidebar.subheader("2. 분석 기간 및 키워드 설정")
 file_start_date = raw_trade_df['Date'].min()
 file_end_date = raw_trade_df['Date'].max()
@@ -356,8 +382,6 @@ default_keywords = ", ".join(st.session_state.selected_categories)
 keyword_input = st.sidebar.text_input("트렌드/뉴스 분석 키워드", default_keywords)
 search_keywords = [k.strip() for k in keyword_input.split(',') if k.strip()]
 
-# 3. Fetch External Data
-# 3. Fetch External Data (Improved UI)
 st.sidebar.subheader("3. 외부 데이터 연동")
 with st.sidebar.expander("🔑 API 키 입력"):
     kamis_api_key = st.text_input("KAMIS API Key", type="password")
@@ -365,43 +389,32 @@ with st.sidebar.expander("🔑 API 키 입력"):
     naver_client_id = st.text_input("Naver API Client ID", type="password")
     naver_client_secret = st.text_input("Naver API Client Secret", type="password")
 
-# --- KAMIS Data Section ---
 st.sidebar.markdown("##### KAMIS 농산물 가격")
 kamis_item_name = st.sidebar.selectbox("품목 선택", list(KAMIS_FULL_DATA.keys()))
 if kamis_item_name:
     kamis_kind_name = st.sidebar.selectbox("품종 선택", list(KAMIS_FULL_DATA[kamis_item_name]['kinds'].keys()))
     if st.sidebar.button("🌾 KAMIS 데이터 가져오기"):
         if kamis_api_key and kamis_api_id:
-            with st.spinner("KAMIS 데이터 가져오는 중..."):
-                item_info = KAMIS_FULL_DATA[kamis_item_name]
-                item_info['item_code'] = item_info['item_code']
-                item_info['kind_code'] = item_info['kinds'][kamis_kind_name]
-                item_info['rank_code'] = '01'
-                st.session_state.wholesale_data = fetch_kamis_data(bq_client, item_info, start_date, end_date, {'key': kamis_api_key, 'id': kamis_api_id})
+            item_info = KAMIS_FULL_DATA[kamis_item_name]
+            item_info['kind_code'] = item_info['kinds'][kamis_kind_name]
+            item_info['rank_code'] = '01'
+            st.session_state.wholesale_data = fetch_kamis_data(bq_client, item_info, start_date, end_date, {'key': kamis_api_key, 'id': kamis_api_id})
         else:
             st.sidebar.error("KAMIS API Key와 ID를 모두 입력해주세요.")
 
-# --- Naver Trend Data Section ---
 st.sidebar.markdown("##### 네이버 트렌드 데이터")
 if st.sidebar.button("📈 네이버 트렌드 가져오기"):
     if search_keywords and naver_client_id and naver_client_secret:
-        with st.spinner("네이버 트렌드 데이터 가져오는 중..."):
-            st.session_state.search_data = fetch_naver_trends_data(bq_client, search_keywords, start_date, end_date, {'id': naver_client_id, 'secret': naver_client_secret})
-    elif not search_keywords:
-        st.sidebar.warning("트렌드 분석 키워드를 입력해주세요.")
-    else:
-        st.sidebar.error("Naver API 키를 입력해주세요.")
+        st.session_state.search_data = fetch_naver_trends_data(bq_client, search_keywords, start_date, end_date, {'id': naver_client_id, 'secret': naver_client_secret})
+    elif not search_keywords: st.sidebar.warning("트렌드 분석 키워드를 입력해주세요.")
+    else: st.sidebar.error("Naver API 키를 입력해주세요.")
             
-# --- News Sentiment Data Section ---
-st.sidebar.markdown("##### 뉴스 감성 분석")
+st.sidebar.markdown("##### 뉴스 감성 분석 (KR-FinBERT)")
 if st.sidebar.button("📰 뉴스 감성 분석 실행"):
     if search_keywords:
-        with st.spinner("뉴스 감성 데이터 가져오는 중..."):
-            # For simplicity, fetch for the first keyword
-            st.session_state.news_data = fetch_and_analyze_news_lightweight(bq_client, nlp_client, search_keywords[0])
+        st.session_state.news_data = get_news_with_finbert_analysis(bq_client, classifier, search_keywords[0])
     else:
         st.sidebar.warning("뉴스 분석 키워드를 입력해주세요.")
-
 
 # --- Main Display Tabs ---
 raw_wholesale_df = st.session_state.get('wholesale_data', pd.DataFrame())
@@ -419,7 +432,6 @@ with tab1:
     
 with tab2:
     st.header("데이터 표준화: 주별(Weekly) 데이터로 변환")
-    # (이하 탭 내용은 이전과 동일)
     trade_df_in_range = raw_trade_df[(raw_trade_df['Date'] >= start_date) & (raw_trade_df['Date'] <= end_date)]
     filtered_trade_df = trade_df_in_range[trade_df_in_range['Category'].isin(st.session_state.selected_categories)].copy()
     
@@ -444,8 +456,7 @@ with tab2:
         st.session_state['weekly_dfs'] = weekly_dfs
         st.write("### 주별 집계 데이터 샘플")
         for name, df in weekly_dfs.items():
-            st.write(f"##### {name.capitalize()} Data (Weekly)")
-            st.dataframe(df.head())
+            st.write(f"##### {name.capitalize()} Data (Weekly)"); st.dataframe(df.head())
     else:
         st.warning("선택된 기간에 해당하는 수출입 데이터가 없습니다.")
 
@@ -461,7 +472,7 @@ with tab3:
         st.subheader("수집된 뉴스 기사 목록 (최신순)")
         st.dataframe(raw_news_df.sort_values(by='날짜', ascending=False))
     else:
-        st.info("사이드바에서 외부 데이터를 가져와주세요.")
+        st.info("사이드바에서 뉴스 감성 분석을 실행해주세요.")
 
 with tab4:
     st.header("상관관계 분석")
@@ -498,7 +509,6 @@ with tab5:
             if len(ts_data) < 24:
                 st.warning(f"최소 24주 이상의 데이터가 필요합니다. 현재: {len(ts_data)}주")
             else:
-                # (이하 예측 로직은 이전과 동일)
                 with st.spinner(f"'{forecast_col}' 예측 모델 학습 중..."):
                     st.subheader(f"'{forecast_col}' 시계열 분해")
                     period = 52 if len(ts_data) >= 104 else max(4, int(len(ts_data) / 2))
