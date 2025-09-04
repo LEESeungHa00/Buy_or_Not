@@ -23,6 +23,30 @@ import torch
 from captum.attr import LayerIntegratedGradients, TokenReferenceBase
 import logging
 
+# --- Constants & Global Settings ---
+# GPU 사용 설정 (Streamlit Cloud에서는 CPU를 사용하게 됩니다)
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu" 
+
+# BigQuery 설정
+BQ_DATASET = "data_explorer"  # 데이터를 저장할 BigQuery 데이터셋 이름
+BQ_TABLE_NEWS = "news_sentiment_analysis_results" # 뉴스 분석 결과를 저장할 테이블 이름
+
+# 감성 분석 모델 상세 설정
+BATCH_SIZE = 8                # 한 번에 몇 개의 기사를 분석할지 결정
+TOPK_WORDS = 5                # 긍정/부정 키워드를 몇 개까지 보여줄지 결정
+IG_PROB_THRESH = 0.7          # 예측 확률이 이 값보다 낮으면 상세 분석(IG) 실행
+IG_MARGIN_THRESH = 0.2        # 1위 예측과 2위 예측 확률 차이가 이 값보다 작으면 상세 분석(IG) 실행
+IG_N_STEPS = 50               # 상세 분석(IG)의 정확도 관련 설정
+
+# 한국어 형태소 분석기 설정 (Streamlit Cloud 설치가 까다로우므로 우선 False로 둡니다)
+MECAB_AVAILABLE = False
+# try:
+#     from konlpy.tag import Mecab
+#     mecab = Mecab()
+#     MECAB_AVAILABLE = True
+# except ImportError:
+#     MECAB_AVAILABLE = False
+
 # --- BigQuery Connection ---
 @st.cache_resource
 def get_bq_connection():
