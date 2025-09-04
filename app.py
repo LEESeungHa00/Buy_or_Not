@@ -19,7 +19,7 @@ from prophet import Prophet
 from prophet.plot import plot_plotly
 import feedparser
 from urllib.parse import quote
-import torch
+#import torch
 from captum.attr import LayerIntegratedGradients, TokenReferenceBase
 import logging
 from google.cloud import language_v1
