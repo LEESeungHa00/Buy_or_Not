@@ -245,7 +245,7 @@ def fetch_robust_news_data(client, keywords, models):
                 "Keyword": subset.loc[i,"Keyword"],
                 "Language": lang,
                 "Sentiment": score,
-                "InsertedAt": datetime.utcnow()
+                "InsertedAt": datetime.now(datetime.UTC)
             })
     final_df = pd.DataFrame(rows)
     if client is not None and not final_df.empty:
