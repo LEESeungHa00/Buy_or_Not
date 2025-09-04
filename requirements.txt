@@ -1,4 +1,4 @@
---extra-index-url https://download.pytorch.org/whl/cpu
+# requirements.txt (New Final Version)
 streamlit
 pandas
 numpy
@@ -8,13 +8,11 @@ requests
 yfinance
 google-auth
 google-cloud-bigquery
-google-cloud-bigquery-storage
-captum
 pandas-gbq
 newspaper3k
-transformers
 statsmodels
 prophet
 feedparser
-torch
 lxml[html_clean]
+google-cloud-bigquery-storage
+google-cloud-language
