@@ -13,7 +13,7 @@ from google.oauth2 import service_account
 from google.cloud import bigquery
 import pandas_gbq
 from newspaper import Article, Config
-from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
+#from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
 from statsmodels.tsa.seasonal import seasonal_decompose
 from prophet import Prophet
 from prophet.plot import plot_plotly
