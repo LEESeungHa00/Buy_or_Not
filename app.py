@@ -467,9 +467,17 @@ def fetch_naver_trends_data(_client, keywords, start_date, end_date, naver_keys)
 
 
     # 4. 새로 가져온 데이터가 있다면, 캐시에 '추가'하고 기존 데이터와 통합
+ # 4. 새로 가져온 데이터가 있다면, 캐시에 '추가'하고 기존 데이터와 통합
     if new_data_list:
-        df_new = pd.concat(new_data_list, ignore_index=True)
-        df_new['날짜'] = pd.to_datetime(df_new['날짜'])
+        # [핵심 수정] 리스트에서 비어있지 않은 데이터프레임만 필터링합니다.
+        non_empty_dfs = [df for df in new_data_list if not df.empty]
+        
+        # 필터링 후에도 데이터가 남아있을 때만 concat을 실행합니다.
+        if non_empty_dfs:
+            df_new = pd.concat(non_empty_dfs, ignore_index=True)
+            df_new['날짜'] = pd.to_datetime(df_new['날짜'])
+        else:
+            df_new = pd.DataFrame() # 모든 API 호출 결과가 비어있었을 경우
         
         # [핵심 수정] 기존 캐시와 합치고, 중복 제거 후, 'replace'가 아닌 전체를 다시 쓰기
         # (BigQuery는 기본 append가 까다로워, 읽고-합치고-전체쓰기 방식이 안정적)
