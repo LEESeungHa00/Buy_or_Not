@@ -21,6 +21,7 @@ import feedparser
 from urllib.parse import quote
 import torch
 from captum.attr import LayerIntegratedGradients, TokenReferenceBase
+import logging
 
 # --- BigQuery Connection ---
 @st.cache_resource
