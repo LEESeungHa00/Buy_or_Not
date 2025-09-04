@@ -35,22 +35,172 @@ def get_bq_connection():
         st.error(f"Google BigQuery 연결 실패: secrets.toml 설정을 확인하세요. 오류: {e}")
         return None
 
-# --- Sentiment Analysis Model & Explainer ---
+# --- Sentiment Models ---
 @st.cache_resource
 def load_sentiment_assets():
-    """한/영 감성 분석 모델을 로드합니다."""
-    with st.spinner("한/영 감성 분석 AI 모델 로드 중..."):
-        assets = {
+    with st.spinner("한/영 감성 분석 모델 로드 중..."):
+        return {
             'ko': {
                 'model': AutoModelForSequenceClassification.from_pretrained("snunlp/KR-FinBERT-SC"),
-                'tokenizer': AutoTokenizer.from_pretrained("snunlp/KR-FinBERT-SC")
+                'tokenizer': AutoTokenizer.from_pretrained("snunlp/KR-FinBERT-SC", use_fast=True)
             },
             'en': {
-                'model': AutoModelForSequenceClassification.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english"),
-                'tokenizer': AutoTokenizer.from_pretrained("distilbert-base-uncased-finetuned-sst-2-english")
+                'model': AutoModelForSequenceClassification.from_pretrained("ProsusAI/finbert"),
+                'tokenizer': AutoTokenizer.from_pretrained("ProsusAI/finbert", use_fast=True)
             }
         }
-    return assets
+
+# --- Helper functions ---
+def _softmax(x):
+    e = np.exp(x - np.max(x, axis=-1, keepdims=True))
+    return e / e.sum(axis=-1, keepdims=True)
+
+def predict_batch(texts, model, tokenizer, device=DEVICE, max_len=128):
+    model.eval()
+    enc = tokenizer(texts, return_tensors='pt', padding=True, truncation=True,
+                    max_length=max_len, return_offsets_mapping=False)
+    if device != "cpu":
+        enc = {k: v.to(device) for k, v in enc.items()}
+        model.to(device)
+    with torch.no_grad():
+        logits = model(**enc).logits
+    probs = _softmax(logits.cpu().numpy())
+    id2label = model.config.id2label
+    labels = [id2label[i].lower() for i in range(logits.shape[-1])]
+    return probs, labels
+
+def compute_margin_and_pred(probs, labels):
+    order = np.argsort(probs)[::-1]
+    pred_idx = int(order[0])
+    pred_prob = float(probs[pred_idx])
+    second = float(probs[order[1]]) if len(order) > 1 else 0.0
+    margin = pred_prob - second
+    return pred_idx, pred_prob, margin
+
+class ForwardWrapper(torch.nn.Module):
+    def __init__(self, model): super().__init__(); self.model = model
+    def forward(self, input_ids, attention_mask):
+        return self.model(input_ids=input_ids, attention_mask=attention_mask).logits
+
+def token_attributions_ig(text, model, tokenizer, target_idx,
+                          max_len=128, n_steps=IG_N_STEPS):
+    model.eval()
+    enc = tokenizer(text, return_tensors='pt', truncation=True, padding='max_length',
+                    max_length=max_len, return_offsets_mapping=True)
+    input_ids, attention_mask = enc['input_ids'], enc['attention_mask']
+    offsets = enc['offset_mapping'][0].tolist()
+    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+    baselines = torch.full_like(input_ids, pad_id)
+    fw = ForwardWrapper(model)
+    lig = LayerIntegratedGradients(fw, model.get_input_embeddings())
+    attributions, _ = lig.attribute(inputs=input_ids,
+                                    baselines=baselines,
+                                    additional_forward_args=(attention_mask,),
+                                    target=target_idx,
+                                    n_steps=n_steps)
+    token_attr = attributions.sum(dim=-1).squeeze(0).cpu().numpy()
+    token_attr = token_attr * attention_mask.squeeze(0).cpu().numpy()
+    tokens = tokenizer.convert_ids_to_tokens(input_ids[0])
+    keep_idx = [i for i, t in enumerate(tokens)
+                if t not in (tokenizer.cls_token, tokenizer.sep_token, tokenizer.pad_token)]
+    words = []
+    for i in keep_idx:
+        s, e = offsets[i]
+        word = text[s:e]
+        words.append((word, float(token_attr[i])))
+    if MECAB_AVAILABLE:
+        merged = {}
+        for w, sc in words:
+            try: morphs = mecab.nouns(w) or [w]
+            except: morphs = [w]
+            for m in morphs: merged[m] = merged.get(m, 0.0) + sc
+        words = list(merged.items())
+    pos = sorted([x for x in words if x[1] > 0], key=lambda x: -x[1])
+    neg = sorted([x for x in words if x[1] < 0], key=lambda x: x[1])
+    return pos, neg
+
+def classify_with_conditional_ig(texts, model, tokenizer,
+                                batch_size=BATCH_SIZE, topk=TOPK_WORDS):
+    results = []
+    for i in range(0, len(texts), batch_size):
+        chunk = texts[i:i+batch_size]
+        probs_batch, labels = predict_batch(chunk, model, tokenizer)
+        for j, text in enumerate(chunk):
+            probs = probs_batch[j]
+            pred_idx, pred_prob, margin = compute_margin_and_pred(probs, labels)
+            pred_label = labels[pred_idx]
+            run_ig = (pred_prob < IG_PROB_THRESH) or (margin < IG_MARGIN_THRESH)
+            pos_words, neg_words = [], []
+            if run_ig:
+                try:
+                    pos_words, neg_words = token_attributions_ig(text, model, tokenizer, pred_idx)
+                except Exception as e:
+                    logging.warning(f"IG 실패: {e}")
+            top_pos = [w for w,_ in pos_words[:topk]]
+            top_neg = [w for w,_ in neg_words[:topk]]
+            results.append({
+                "text": text,
+                "label": pred_label,
+                "prob": float(pred_prob),
+                "top_pos_words": top_pos,
+                "top_neg_words": top_neg,
+                "probs": {labels[k]: float(probs[k]) for k in range(len(labels))},
+                "margin": float(margin)
+            })
+    return results
+
+# --- News pipeline ---
+def fetch_robust_news_data(client, keywords, models):
+    config = Config()
+    config.browser_user_agent = 'Mozilla/5.0'
+    all_news, today = [], datetime.now()
+    start_date = today - timedelta(days=14)
+    for kw in keywords:
+        st.write(f"▶ '{kw}' 키워드 뉴스 수집 중...")
+        for lang, rss_url in {
+            'ko': f"https://news.google.com/rss/search?q={quote(kw)}&hl=ko&gl=KR&ceid=KR:ko",
+            'en': f"https://news.google.com/rss/search?q={quote(kw)}&hl=en-US&gl=US&ceid=US:en-US"
+        }.items():
+            feed = feedparser.parse(rss_url)
+            for entry in feed.entries[:30]:
+                title = entry.get('title', '')
+                if not title: continue
+                try: pub_date = pd.to_datetime(entry.get('published'))
+                except: pub_date = None
+                if pub_date and start_date <= pub_date <= today:
+                    all_news.append({"Date": pub_date.date(), "Title": title, "Keyword": kw, "Language": lang})
+    if not all_news:
+        return pd.DataFrame()
+    df = pd.DataFrame(all_news).drop_duplicates(subset=["Title","Keyword","Language"])
+    rows = []
+    for lang in df["Language"].unique():
+        subset = df[df["Language"]==lang].reset_index(drop=True)
+        titles = subset["Title"].tolist()
+        model, tok = models[lang]["model"], models[lang]["tokenizer"]
+        results = classify_with_conditional_ig(titles, model, tok)
+        for i,r in enumerate(results):
+            posp = r["probs"].get("positive", r["probs"].get("pos",0))
+            negp = r["probs"].get("negative", r["probs"].get("neg",0))
+            score = posp - negp
+            rows.append({
+                "날짜": subset.loc[i,"Date"],
+                "Title": r["text"],
+                "Label": r["label"],
+                "Prob": r["prob"],
+                "Top_Positive_Keywords": ", ".join(r["top_pos_words"]),
+                "Top_Negative_Keywords": ", ".join(r["top_neg_words"]),
+                "Keyword": subset.loc[i,"Keyword"],
+                "Language": lang,
+                "Sentiment": score,
+                "InsertedAt": datetime.utcnow()
+            })
+    final_df = pd.DataFrame(rows)
+    if client is not None and not final_df.empty:
+        ensure_bq_table_schema(client, BQ_DATASET, BQ_TABLE_NEWS)
+        pandas_gbq.to_gbq(final_df, f"{client.project}.{BQ_DATASET}.{BQ_TABLE_NEWS}",
+                          project_id=client.project, if_exists="append",
+                          credentials=client._credentials)
+    return final_df
 
 # --- Data Fetching & Processing Functions ---
 
