@@ -22,13 +22,17 @@ from urllib.parse import quote
 import torch
 from captum.attr import LayerIntegratedGradients, TokenReferenceBase
 import logging
+from google.cloud import language_v1
 
 # --- Constants & Global Settings ---
 BQ_TABLE_NEWS = "news_sentiment_analysis_results" # 뉴스 분석 결과를 저장할 테이블 이름
 BQ_TABLE_NAVER = "naver_trends_cache" # [추가] 네이버 트렌드 캐시 테이블 이름
 # GPU 사용 설정 (Streamlit Cloud에서는 CPU를 사용하게 됩니다)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu" 
-
+bq_client = get_bq_connection()
+nlp_client = get_gcp_nlp_client() # NLP 클라이언트 추가
+if bq_client is None or nlp_client is None: st.stop()
+    
 # BigQuery 설정
 BQ_DATASET = "data_explorer"  # 데이터를 저장할 BigQuery 데이터셋 이름
 BQ_TABLE_NEWS = "news_sentiment_analysis_results" # 뉴스 분석 결과를 저장할 테이블 이름
@@ -89,20 +93,103 @@ def ensure_bq_table_schema(client, dataset_id, table_id):
         st.success(f"테이블 '{table_id}' 생성 완료.")
         
 # --- Sentiment Models ---
+# --- Google NLP Client ---
 @st.cache_resource
-def load_sentiment_assets():
-    with st.spinner("한/영 감성 분석 모델 로드 중..."):
-        return {
-            'ko': {
-                'model': AutoModelForSequenceClassification.from_pretrained("snunlp/KR-FinBERT-SC"),
-                'tokenizer': AutoTokenizer.from_pretrained("snunlp/KR-FinBERT-SC", use_fast=True)
-            },
-            'en': {
-                'model': AutoModelForSequenceClassification.from_pretrained("ProsusAI/finbert"),
-                'tokenizer': AutoTokenizer.from_pretrained("ProsusAI/finbert", use_fast=True)
-            }
-        }
+def get_gcp_nlp_client():
+    """Google Cloud Natural Language API 클라이언트를 반환합니다."""
+    try:
+        creds_dict = st.secrets["gcp_service_account"]
+        creds = service_account.Credentials.from_service_account_info(creds_dict)
+        nlp_client = language_v1.LanguageServiceClient(credentials=creds)
+        return nlp_client
+    except Exception as e:
+        st.error(f"Google NLP 연결 실패: {e}")
+        return None
 
+def analyze_sentiment_with_google(text_content, nlp_client):
+    """주어진 텍스트의 감성을 Google NLP API를 사용해 분석합니다."""
+    if not text_content or not nlp_client:
+        return 0.0, 0.0
+
+    document = language_v1.Document(content=text_content, type_=language_v1.Document.Type.PLAIN_TEXT)
+    response = nlp_client.analyze_sentiment(request={'document': document})
+    return response.document_sentiment.score, response.document_sentiment.magnitude
+
+def fetch_and_analyze_news_lightweight(bq_client, nlp_client, keyword, days_limit=7):
+    """
+    뉴스를 수집하고 Google NLP로 분석 후, BigQuery에 캐싱하는 경량화된 함수.
+    """
+    project_id = bq_client.project
+    dataset_id = BQ_DATASET
+    table_id = BQ_TABLE_NEWS
+    full_table_id = f"{project_id}.{dataset_id}.{table_id}"
+
+    # 1. BigQuery에서 최신 캐시 확인
+    try:
+        time_limit = datetime.now(timezone.utc) - timedelta(days=days_limit)
+        query = f"""
+            SELECT * FROM `{full_table_id}`
+            WHERE Keyword = @keyword AND InsertedAt >= @time_limit
+            ORDER BY 날짜 DESC
+        """
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("keyword", "STRING", keyword),
+                bigquery.ScalarQueryParameter("time_limit", "TIMESTAMP", time_limit),
+            ]
+        )
+        df_cache = bq_client.query(query, job_config=job_config).to_dataframe()
+    except Exception:
+        df_cache = pd.DataFrame()
+
+    if not df_cache.empty:
+        st.sidebar.success(f"✔️ '{keyword}' 최신 분석 결과를 캐시에서 로드했습니다.")
+        return df_cache
+
+    # 2. 캐시 없으면 새로 수집 및 분석
+    st.sidebar.warning(f"'{keyword}'에 대한 최신 캐시가 없습니다.\n새로 뉴스를 분석합니다...")
+    
+    with st.spinner(f"'{keyword}' 뉴스 수집 및 분석 중..."):
+        all_news = []
+        rss_url = f"https://news.google.com/rss/search?q={quote(keyword)}&hl=ko&gl=KR&ceid=KR:ko"
+        feed = feedparser.parse(rss_url)
+        
+        for entry in feed.entries[:20]: # 기사 20개로 제한
+            title = entry.get('title', '')
+            if not title: continue
+            try:
+                pub_date = pd.to_datetime(entry.get('published')).date()
+                all_news.append({"날짜": pub_date, "Title": title})
+            except:
+                continue
+        
+        if not all_news:
+            st.error("분석할 뉴스를 찾지 못했습니다.")
+            return pd.DataFrame()
+
+        df_new = pd.DataFrame(all_news)
+        df_new = df_new.drop_duplicates(subset=["Title"])
+
+        # Google NLP API로 감성 분석 실행
+        sentiments = [analyze_sentiment_with_google(title, nlp_client) for title in df_new['Title']]
+        df_new['Sentiment'] = [s[0] for s in sentiments] # score
+        df_new['Magnitude'] = [s[1] for s in sentiments] # magnitude
+        df_new['Keyword'] = keyword
+        df_new['InsertedAt'] = datetime.now(timezone.utc)
+        
+        # 3. BigQuery에 새 결과 저장
+        if not df_new.empty:
+            st.sidebar.info("새 분석 결과를 BigQuery 캐시에 저장합니다.")
+            # 테이블 스키마에 맞게 컬럼 정리 (Label 등 불필요한 컬럼 제외)
+            final_cols = {
+                "날짜": "DATE", "Title": "STRING", "Keyword": "STRING", 
+                "Sentiment": "FLOAT", "Magnitude": "FLOAT", "InsertedAt": "TIMESTAMP"
+            }
+            df_to_gbq = df_new[list(final_cols.keys())]
+            pandas_gbq.to_gbq(df_to_gbq, full_table_id, project_id=project_id, if_exists="append")
+        
+        return df_to_gbq
+        
 # --- Helper functions ---
 def _softmax(x):
     e = np.exp(x - np.max(x, axis=-1, keepdims=True))
@@ -172,129 +259,7 @@ def token_attributions_ig(text, model, tokenizer, target_idx,
     neg = sorted([x for x in words if x[1] < 0], key=lambda x: x[1])
     return pos, neg
 
-def classify_with_conditional_ig(texts, model, tokenizer,
-                                batch_size=BATCH_SIZE, topk=TOPK_WORDS):
-    results = []
-    for i in range(0, len(texts), batch_size):
-        chunk = texts[i:i+batch_size]
-        probs_batch, labels = predict_batch(chunk, model, tokenizer)
-        for j, text in enumerate(chunk):
-            probs = probs_batch[j]
-            pred_idx, pred_prob, margin = compute_margin_and_pred(probs, labels)
-            pred_label = labels[pred_idx]
-            run_ig = (pred_prob < IG_PROB_THRESH) or (margin < IG_MARGIN_THRESH)
-            pos_words, neg_words = [], []
-            if run_ig:
-                try:
-                    pos_words, neg_words = token_attributions_ig(text, model, tokenizer, pred_idx)
-                except Exception as e:
-                    logging.warning(f"IG 실패: {e}")
-            top_pos = [w for w,_ in pos_words[:topk]]
-            top_neg = [w for w,_ in neg_words[:topk]]
-            results.append({
-                "text": text,
-                "label": pred_label,
-                "prob": float(pred_prob),
-                "top_pos_words": top_pos,
-                "top_neg_words": top_neg,
-                "probs": {labels[k]: float(probs[k]) for k in range(len(labels))},
-                "margin": float(margin)
-            })
-    return results
 
-# --- News pipeline ---
-def get_news_analysis(client, keyword, days_limit=7):
-    """
-    특정 키워드에 대해 BigQuery 캐시를 먼저 확인하고,
-    캐시가 없거나 오래된 경우에만 새로 분석을 수행하고 결과를 저장합니다.
-    """
-    project_id = client.project
-    dataset_id = BQ_DATASET
-    table_id = BQ_TABLE_NEWS # 뉴스 분석 결과를 저장하는 테이블
-    full_table_id = f"{project_id}.{dataset_id}.{table_id}"
-
-    # 1. 먼저 BigQuery에서 최신 캐시가 있는지 확인
-    try:
-        # 최근 N일 내에 해당 키워드로 분석한 데이터가 있는지 조회
-        time_limit = datetime.now(timezone.utc) - timedelta(days=days_limit)
-        query = f"""
-            SELECT * FROM `{full_table_id}`
-            WHERE Keyword = @keyword AND InsertedAt >= @time_limit
-            ORDER BY 날짜 DESC
-        """
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("keyword", "STRING", keyword),
-                bigquery.ScalarQueryParameter("time_limit", "TIMESTAMP", time_limit),
-            ]
-        )
-        df_cache = client.query(query, job_config=job_config).to_dataframe()
-    except Exception:
-        df_cache = pd.DataFrame()
-
-    # 2. 캐시가 있으면 캐시 결과를 즉시 반환 (빠른 경로)
-    if not df_cache.empty:
-        st.sidebar.success(f"✔️ '{keyword}' 최신 분석 결과를 캐시에서 로드했습니다.")
-        return df_cache
-
-    # 3. 캐시가 없으면 새로 분석 수행 (느린 경로)
-    st.sidebar.warning(f"'{keyword}'에 대한 최신 캐시가 없습니다.\n새로 뉴스를 분석합니다. (약 1~2분 소요)")
-    
-    with st.spinner(f"'{keyword}' 뉴스 수집 및 AI 분석 중..."):
-        # (이 부분은 원래의 뉴스 분석 로직을 거의 그대로 사용합니다)
-        models = load_sentiment_assets() # AI 모델 로드
-        all_news, today = [], datetime.now()
-        start_date = today - timedelta(days=14)
-        
-        # 한국어/영어 뉴스 수집
-        for lang, rss_url in {
-            'ko': f"https://news.google.com/rss/search?q={quote(keyword)}&hl=ko&gl=KR&ceid=KR:ko",
-            'en': f"https://news.google.com/rss/search?q={quote(keyword)}&hl=en-US&gl=US&ceid=US:en-US"
-        }.items():
-            feed = feedparser.parse(rss_url)
-            for entry in feed.entries[:15]: # 기사 수는 15개로 제한
-                title = entry.get('title', '')
-                if not title: continue
-                try:
-                    pub_date = pd.to_datetime(entry.get('published'))
-                except:
-                    pub_date = None
-                
-                if pub_date and start_date <= pub_date <= today:
-                    all_news.append({"Date": pub_date.date(), "Title": title, "Keyword": keyword, "Language": lang})
-        
-        if not all_news:
-            st.error("분석할 뉴스를 찾지 못했습니다.")
-            return pd.DataFrame()
-
-        df = pd.DataFrame(all_news).drop_duplicates(subset=["Title", "Keyword", "Language"])
-        
-        # AI 감성 분석 실행
-        rows = []
-        for lang in df["Language"].unique():
-            subset = df[df["Language"] == lang].reset_index(drop=True)
-            titles = subset["Title"].tolist()
-            model, tok = models[lang]["model"], models[lang]["tokenizer"]
-            results = classify_with_conditional_ig(titles, model, tok) # 이 함수는 기존 코드를 그대로 사용
-            for i, r in enumerate(results):
-                posp = r["probs"].get("positive", r["probs"].get("pos", 0))
-                negp = r["probs"].get("negative", r["probs"].get("neg", 0))
-                score = posp - negp
-                rows.append({
-                    "날짜": subset.loc[i, "Date"], "Title": r["text"], "Label": r["label"],
-                    "Prob": r["prob"], "Top_Positive_Keywords": ", ".join(r["top_pos_words"]),
-                    "Top_Negative_Keywords": ", ".join(r["top_neg_words"]), "Keyword": subset.loc[i, "Keyword"],
-                    "Language": lang, "Sentiment": score, "InsertedAt": datetime.now(timezone.utc)
-                })
-
-        df_new = pd.DataFrame(rows)
-
-        # 4. 새로 만든 결과를 BigQuery에 저장
-        if not df_new.empty:
-            st.sidebar.info("새 분석 결과를 BigQuery 캐시에 저장합니다.")
-            pandas_gbq.to_gbq(df_new, full_table_id, project_id=project_id, if_exists="append", credentials=_client._credentials)
-        
-        return df_new
 # --- Data Fetching & Processing Functions ---
 
 @st.cache_data(ttl=3600)
@@ -631,16 +596,16 @@ if st.sidebar.button("네이버 트렌드 가져오기"):
         st.session_state.search_data = fetch_naver_trends_data(bq_client, search_keywords, start_date, end_date, {'id': naver_client_id, 'secret': naver_client_secret})
 
 st.sidebar.markdown("##### 뉴스 감성 분석")
-news_keyword = st.sidebar.text_input("분석할 뉴스 키워드 입력", placeholder="예: 커피 원두")
+news_keyword = st.sidebar.text_input("분석할 뉴스 키워드 입력", placeholder="예: 커피")
 
 if st.sidebar.button("📰 뉴스 감성 분석 실행"):
     if not news_keyword:
         st.sidebar.warning("분석할 키워드를 먼저 입력해주세요.")
     else:
-        # 새로 만든 스마트 캐시 함수 호출
-        result_df = get_news_analysis(bq_client, news_keyword)
-        st.session_state.news_data = result_df # 결과를 세션에 저장
-
+        # 새로 만든 경량화 함수 호출
+        result_df = fetch_and_analyze_news_lightweight(bq_client, nlp_client, news_keyword)
+        st.session_state.news_data = result_df
+        
 # --- Main Display Tabs ---
 raw_wholesale_df = st.session_state.get('wholesale_data', pd.DataFrame())
 raw_search_df = st.session_state.get('search_data', pd.DataFrame())
