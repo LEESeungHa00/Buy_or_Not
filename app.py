@@ -27,8 +27,7 @@ from google.cloud import language_v1
 # --- Constants & Global Settings ---
 BQ_TABLE_NEWS = "news_sentiment_analysis_results" # 뉴스 분석 결과를 저장할 테이블 이름
 BQ_TABLE_NAVER = "naver_trends_cache" # [추가] 네이버 트렌드 캐시 테이블 이름
-# GPU 사용 설정 (Streamlit Cloud에서는 CPU를 사용하게 됩니다)
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu" 
+
 bq_client = get_bq_connection()
 nlp_client = get_gcp_nlp_client() # NLP 클라이언트 추가
 if bq_client is None or nlp_client is None: st.stop()
