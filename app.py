@@ -101,7 +101,20 @@ def call_naver_api(url, body, naver_keys):
 # ==============================================================================
 # --- 3. Main Data Fetching Functions ---
 # ==============================================================================
-
+@st.cache_data(ttl=3600)
+def get_categories_from_bq(_client):
+    """BigQuery에서 분석 가능한 품목 카테고리 목록을 가져옵니다."""
+    project_id = _client.project
+    table_id = f"{project_id}.{BQ_DATASET}.tds_data"
+    try:
+        with st.spinner("BigQuery에서 카테고리 목록 불러오는 중..."):
+            query = f"SELECT DISTINCT Category FROM `{table_id}` WHERE Category IS NOT NULL ORDER BY Category"
+            df = _client.query(query).to_dataframe()
+        return sorted(df['Category'].astype(str).unique())
+    except Exception as e:
+        st.error(f"BigQuery 테이블({table_id})을 읽는 중 오류: {e}")
+        return []
+        
 def get_trade_data_from_bq(client, categories):
     """선택된 카테고리에 대한 수출입 데이터를 BigQuery에서 가져옵니다."""
     # (이하 함수 내용은 이전과 동일)
