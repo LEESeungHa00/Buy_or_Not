@@ -595,7 +595,8 @@ naver_client_secret = st.sidebar.text_input("Naver API Client Secret", type="pas
 if st.sidebar.button("네이버 트렌드 가져오기"):
     if not search_keywords: st.sidebar.warning("분석할 키워드를 먼저 입력해주세요.")
     else:
-        st.session_state.search_data = fetch_naver_trends_data(search_keywords, start_date, end_date, {'id': naver_client_id, 'secret': naver_client_secret})
+        # bq_client를 첫 번째 인자로 추가
+        st.session_state.search_data = fetch_naver_trends_data(bq_client, search_keywords, start_date, end_date, {'id': naver_client_id, 'secret': naver_client_secret})
 
 st.sidebar.markdown("##### 뉴스 감성 분석")
 if st.sidebar.button("최신 뉴스 분석하기"):
