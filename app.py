@@ -368,7 +368,8 @@ def fetch_naver_trends_data(keywords, start_date, end_date, naver_keys):
                 search_res = call_naver_api("https://openapi.naver.com/v1/datalab/search", body_search, naver_keys)
                 if search_res and search_res.get('results'):
                     df_search = pd.DataFrame(search_res['results'][0]['data'])
-                    keyword_dfs.append(df_search.rename(columns={'period': '날짜', 'ratio': f'NaverSearch_{keyword}'}))
+                    if not df_search.empty and 'period' in df_search.columns:
+                        keyword_dfs.append(df_search.rename(columns={'period': '날짜', 'ratio': f'NaverSearch_{keyword}'}))
 
                 # 2. 네이버 쇼핑인사이트 API 호출
                 lower_keyword = keyword.lower().replace(' ', '')
