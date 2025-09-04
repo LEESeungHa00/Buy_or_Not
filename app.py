@@ -393,57 +393,6 @@ def fetch_kamis_data(client, item_info, start_date, end_date, kamis_keys):
 
     return pd.DataFrame()
 
-def fetch_robust_news_data(client, keywords, models):
-    """안정성을 높인 뉴스 데이터 수집 및 분석 함수 (RSS 기반)"""
-    config = Config()
-    config.browser_user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36'
-    
-    all_news_data, today = [], datetime.now()
-    start_date = today - timedelta(days=14)
-
-    for keyword in keywords:
-        st.write(f"▶ '{keyword}' 키워드 뉴스 수집 중...")
-        urls = {
-            'ko': f"https://news.google.com/rss/search?q={quote(keyword)}&hl=ko&gl=KR&ceid=KR:ko",
-            'en': f"https://news.google.com/rss/search?q={quote(keyword)}&hl=en-US&gl=US&ceid=US:en-US"
-        }
-        for lang, rss_url in urls.items():
-            try:
-                feed = feedparser.parse(rss_url)
-                if not feed.entries:
-                    st.warning(f"'{keyword}'({lang}) RSS 피드에서 기사를 찾지 못했습니다.")
-                    continue
-                
-                model, tokenizer = models[lang]['model'], models[lang]['tokenizer']
-                for entry in feed.entries[:20]:
-                    try:
-                        article = Article(entry.link, config=config, language=lang)
-                        article.download(); article.parse()
-
-                        if not article.publish_date: continue
-                        pub_date = article.publish_date.replace(tzinfo=None)
-
-                        if start_date <= pub_date <= today:
-                            title = article.title
-                            pipe = pipeline("sentiment-analysis", model=model, tokenizer=tokenizer)
-                            analysis = pipe(title)[0]
-                            label, score = analysis['label'], analysis['score']
-                            sentiment_score = score if label.lower() in ['positive', '5 stars'] else -score
-                            
-                            all_news_data.append({'Date': pub_date.date(), 'Title': title, 'Sentiment': sentiment_score, 'Keyword': keyword, 'Language': lang})
-                    except Exception as e:
-                        st.warning(f"기사 처리 중 오류: {entry.link} - 원인: {str(e)[:100]}")
-            except Exception as e:
-                st.error(f"RSS 피드 처리 중 오류: {rss_url} - 원인: {e}")
-
-    if not all_news_data:
-        st.sidebar.error("수집된 뉴스가 없습니다. 잠시 후 다시 시도해보세요.")
-        return pd.DataFrame()
-
-    final_df = pd.DataFrame(all_news_data)
-    deduplicate_and_write_to_bq(client, final_df, "news_sentiment_cache", subset_cols=['Title', 'Keyword', 'Language'])
-    final_df['Date'] = pd.to_datetime(final_df['Date'])
-    return final_df.rename(columns={'Date': '날짜'})
 
 # --- Constants & App ---
 KAMIS_FULL_DATA = {
