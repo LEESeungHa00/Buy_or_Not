@@ -357,6 +357,7 @@ keyword_input = st.sidebar.text_input("트렌드/뉴스 분석 키워드", defau
 search_keywords = [k.strip() for k in keyword_input.split(',') if k.strip()]
 
 # 3. Fetch External Data
+# 3. Fetch External Data (Improved UI)
 st.sidebar.subheader("3. 외부 데이터 연동")
 with st.sidebar.expander("🔑 API 키 입력"):
     kamis_api_key = st.text_input("KAMIS API Key", type="password")
@@ -364,38 +365,43 @@ with st.sidebar.expander("🔑 API 키 입력"):
     naver_client_id = st.text_input("Naver API Client ID", type="password")
     naver_client_secret = st.text_input("Naver API Client Secret", type="password")
 
-if st.sidebar.button("🔗 모든 외부 데이터 가져오기"):
-    # Fetch KAMIS Data
-    with st.spinner("KAMIS 데이터 가져오는 중..."):
-        # For simplicity, we fetch for the first selected category if it's in KAMIS_FULL_DATA
-        kamis_item_name = next((cat for cat in st.session_state.selected_categories if cat in KAMIS_FULL_DATA), None)
-        if kamis_item_name and kamis_api_key and kamis_api_id:
-            item_info = KAMIS_FULL_DATA[kamis_item_name]
-            item_info['item_code'] = item_info['item_code']
-            item_info['kind_code'] = list(item_info['kinds'].values())[0] # Default to first kind
-            item_info['rank_code'] = '01'
-            st.session_state.wholesale_data = fetch_kamis_data(bq_client, item_info, start_date, end_date, {'key': kamis_api_key, 'id': kamis_api_id})
-        elif not kamis_item_name:
-            st.sidebar.info("선택된 품목에 대한 KAMIS 정보가 없습니다.")
+# --- KAMIS Data Section ---
+st.sidebar.markdown("##### KAMIS 농산물 가격")
+kamis_item_name = st.sidebar.selectbox("품목 선택", list(KAMIS_FULL_DATA.keys()))
+if kamis_item_name:
+    kamis_kind_name = st.sidebar.selectbox("품종 선택", list(KAMIS_FULL_DATA[kamis_item_name]['kinds'].keys()))
+    if st.sidebar.button("🌾 KAMIS 데이터 가져오기"):
+        if kamis_api_key and kamis_api_id:
+            with st.spinner("KAMIS 데이터 가져오는 중..."):
+                item_info = KAMIS_FULL_DATA[kamis_item_name]
+                item_info['item_code'] = item_info['item_code']
+                item_info['kind_code'] = item_info['kinds'][kamis_kind_name]
+                item_info['rank_code'] = '01'
+                st.session_state.wholesale_data = fetch_kamis_data(bq_client, item_info, start_date, end_date, {'key': kamis_api_key, 'id': kamis_api_id})
         else:
-            st.sidebar.warning("KAMIS API 키와 ID를 입력해주세요.")
+            st.sidebar.error("KAMIS API Key와 ID를 모두 입력해주세요.")
 
-    # Fetch Naver Trend Data
-    with st.spinner("네이버 트렌드 데이터 가져오는 중..."):
-        if search_keywords and naver_client_id and naver_client_secret:
+# --- Naver Trend Data Section ---
+st.sidebar.markdown("##### 네이버 트렌드 데이터")
+if st.sidebar.button("📈 네이버 트렌드 가져오기"):
+    if search_keywords and naver_client_id and naver_client_secret:
+        with st.spinner("네이버 트렌드 데이터 가져오는 중..."):
             st.session_state.search_data = fetch_naver_trends_data(bq_client, search_keywords, start_date, end_date, {'id': naver_client_id, 'secret': naver_client_secret})
-        elif not search_keywords:
-            st.sidebar.warning("트렌드 분석 키워드를 입력해주세요.")
-        else:
-            st.sidebar.warning("Naver API 키를 입력해주세요.")
+    elif not search_keywords:
+        st.sidebar.warning("트렌드 분석 키워드를 입력해주세요.")
+    else:
+        st.sidebar.error("Naver API 키를 입력해주세요.")
             
-    # Fetch News Sentiment Data
-    with st.spinner("뉴스 감성 데이터 가져오는 중..."):
-        if search_keywords:
+# --- News Sentiment Data Section ---
+st.sidebar.markdown("##### 뉴스 감성 분석")
+if st.sidebar.button("📰 뉴스 감성 분석 실행"):
+    if search_keywords:
+        with st.spinner("뉴스 감성 데이터 가져오는 중..."):
             # For simplicity, fetch for the first keyword
             st.session_state.news_data = fetch_and_analyze_news_lightweight(bq_client, nlp_client, search_keywords[0])
-        else:
-            st.sidebar.warning("뉴스 분석 키워드를 입력해주세요.")
+    else:
+        st.sidebar.warning("뉴스 분석 키워드를 입력해주세요.")
+
 
 # --- Main Display Tabs ---
 raw_wholesale_df = st.session_state.get('wholesale_data', pd.DataFrame())
