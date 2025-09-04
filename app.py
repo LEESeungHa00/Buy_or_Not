@@ -59,7 +59,33 @@ def get_bq_connection():
     except Exception as e:
         st.error(f"Google BigQuery 연결 실패: secrets.toml 설정을 확인하세요. 오류: {e}")
         return None
-
+        
+def ensure_bq_table_schema(client, dataset_id, table_id):
+    """BigQuery에 테이블이 없으면 지정된 스키마로 생성합니다."""
+    project_id = client.project
+    full_table_id = f"{project_id}.{dataset_id}.{table_id}"
+    
+    try:
+        client.get_table(full_table_id)
+        # st.write(f"테이블 '{full_table_id}'은 이미 존재합니다.")
+    except Exception:
+        st.write(f"테이블 '{full_table_id}'을 새로 생성합니다.")
+        schema = [
+            bigquery.SchemaField("날짜", "DATE"),
+            bigquery.SchemaField("Title", "STRING"),
+            bigquery.SchemaField("Label", "STRING"),
+            bigquery.SchemaField("Prob", "FLOAT"),
+            bigquery.SchemaField("Top_Positive_Keywords", "STRING"),
+            bigquery.SchemaField("Top_Negative_Keywords", "STRING"),
+            bigquery.SchemaField("Keyword", "STRING"),
+            bigquery.SchemaField("Language", "STRING"),
+            bigquery.SchemaField("Sentiment", "FLOAT"),
+            bigquery.SchemaField("InsertedAt", "TIMESTAMP"),
+        ]
+        table = bigquery.Table(full_table_id, schema=schema)
+        client.create_table(table)
+        st.success(f"테이블 '{table_id}' 생성 완료.")
+        
 # --- Sentiment Models ---
 @st.cache_resource
 def load_sentiment_assets():
