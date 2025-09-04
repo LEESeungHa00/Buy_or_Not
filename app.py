@@ -24,6 +24,8 @@ from captum.attr import LayerIntegratedGradients, TokenReferenceBase
 import logging
 
 # --- Constants & Global Settings ---
+BQ_TABLE_NEWS = "news_sentiment_analysis_results" # 뉴스 분석 결과를 저장할 테이블 이름
+BQ_TABLE_NAVER = "naver_trends_cache" # [추가] 네이버 트렌드 캐시 테이블 이름
 # GPU 사용 설정 (Streamlit Cloud에서는 CPU를 사용하게 됩니다)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu" 
 
@@ -338,70 +340,131 @@ def call_naver_api(url, body, naver_keys):
 
 
 @st.cache_data(ttl=3600)
-def fetch_naver_trends_data(keywords, start_date, end_date, naver_keys):
+@st.cache_data(ttl=3600)
+def fetch_naver_trends_data(client, keywords, start_date, end_date, naver_keys):
     """
-    네이버 데이터랩(검색어 트렌드, 쇼핑인사이트) 데이터를 가져옵니다.
-    키워드에 따라 자동으로 쇼핑인사이트 카테고리 ID를 매칭합니다.
+    BigQuery 캐시를 활용하여 네이버 데이터랩(검색어, 쇼핑인사이트) 데이터를
+    3개월 이상 긴 기간에 대해 가져옵니다.
     """
-    if (end_date - start_date).days > 90:
-        st.sidebar.error("네이버 트렌드 조회 기간은 최대 3개월(90일)입니다.")
-        return pd.DataFrame()
+    project_id = client.project
+    dataset_id = BQ_DATASET
+    table_id = BQ_TABLE_NAVER
+    full_table_id = f"{project_id}.{dataset_id}.{table_id}"
 
-    NAVER_SHOPPING_CAT_MAP = {
-        '아보카도': "50000007", '바나나': "50000007", '사과': "50000007", '수입과일': "50000007",
-        '커피': "50000004", '커피 생두': "50000004",
-        '쌀': "50000006", '고등어': "50000009"
-    }
-    all_data = []
+    # 1. BigQuery에서 기존 캐시 데이터 읽기
+    try:
+        # 특정 키워드에 대한 데이터만 필터링하여 가져오기
+        all_cols_query = f"SELECT column_name FROM `{project_id}.{dataset_id}.INFORMATION_SCHEMA.COLUMNS` WHERE table_name = '{table_id}'"
+        all_cols = [row['column_name'] for row in client.query(all_cols_query).result()]
+        
+        keyword_cols = ['날짜']
+        for kw in keywords:
+            if f'NaverSearch_{kw}' in all_cols:
+                keyword_cols.append(f'NaverSearch_{kw}')
+            if f'NaverShop_{kw}' in all_cols:
+                keyword_cols.append(f'NaverShop_{kw}')
 
-    for keyword in keywords:
-        keyword_dfs = []
-        with st.spinner(f"'{keyword}' 네이버 트렌드 데이터를 가져오는 중..."):
-            if naver_keys['id'] and naver_keys['secret']:
-                # 1. 네이버 검색어 트렌드 API 호출 (이 부분은 구조가 원래 맞았음)
+        if len(keyword_cols) > 1:
+            sql = f"SELECT {', '.join(keyword_cols)} FROM `{full_table_id}` ORDER BY 날짜"
+            df_cache = client.query(sql).to_dataframe()
+            df_cache['날짜'] = pd.to_datetime(df_cache['날짜'])
+        else:
+            df_cache = pd.DataFrame(columns=['날짜'])
+
+    except Exception as e:
+        st.sidebar.warning(f"캐시 테이블({table_id})이 없거나 읽을 수 없습니다. 새로 생성합니다.")
+        df_cache = pd.DataFrame(columns=['날짜'])
+
+    # 2. 캐시를 바탕으로 API를 호출할 새로운 기간 결정
+    fetch_start_date = start_date
+    if not df_cache.empty:
+        last_cached_date = df_cache['날짜'].max()
+        if last_cached_date < end_date:
+            fetch_start_date = last_cached_date + timedelta(days=1)
+
+    new_data_list = []
+    if fetch_start_date <= end_date:
+        st.sidebar.write(f"새로운 데이터 수집: {fetch_start_date.date()} ~ {end_date.date()}")
+        # 3. 결정된 기간을 90일 단위로 나누어 API 호출
+        current_start = fetch_start_date
+        while current_start <= end_date:
+            current_end = current_start + timedelta(days=89)
+            if current_end > end_date:
+                current_end = end_date
+
+            st.sidebar.info(f"Naver API 호출 중: {current_start.date()} ~ {current_end.date()}")
+            
+            # (기존 API 호출 로직과 거의 동일)
+            # 이 부분은 이전에 수정한 안전장치가 포함된 코드를 그대로 사용합니다.
+            NAVER_SHOPPING_CAT_MAP = {
+                '아보카도': "50000007", '바나나': "50000007", '사과': "50000007", '수입과일': "50000007",
+                '커피': "50000004", '커피 생두': "50000004",
+                '쌀': "50000006", '고등어': "50000009"
+            }
+            all_data_chunk = []
+            for keyword in keywords:
+                keyword_dfs = []
+                # 검색어 트렌드
                 body_search = json.dumps({
-                    "startDate": start_date.strftime('%Y-%m-%d'), 
-                    "endDate": end_date.strftime('%Y-%m-%d'), 
+                    "startDate": current_start.strftime('%Y-%m-%d'), 
+                    "endDate": current_end.strftime('%Y-%m-%d'), 
                     "timeUnit": "date", 
                     "keywordGroups": [{"groupName": keyword, "keywords": [keyword]}]
                 })
                 search_res = call_naver_api("https://openapi.naver.com/v1/datalab/search", body_search, naver_keys)
-                if search_res and search_res.get('results'):
+                if search_res and search_res.get('results') and search_res['results'][0]['data']:
                     df_search = pd.DataFrame(search_res['results'][0]['data'])
                     if not df_search.empty and 'period' in df_search.columns:
                         keyword_dfs.append(df_search.rename(columns={'period': '날짜', 'ratio': f'NaverSearch_{keyword}'}))
-
-                # 2. 네이버 쇼핑인사이트 API 호출
+                # 쇼핑인사이트
                 lower_keyword = keyword.lower().replace(' ', '')
                 if lower_keyword in NAVER_SHOPPING_CAT_MAP:
                     category_id = NAVER_SHOPPING_CAT_MAP[lower_keyword]
-                    
-                    # [수정] API 문서에 맞는 배열/객체 형태로 구조 변경
                     body_shop = json.dumps({
-                        "startDate": start_date.strftime('%Y-%m-%d'),
-                        "endDate": end_date.strftime('%Y-%m-%d'),
-                        "timeUnit": "date",
-                        "category": [{"name": keyword, "param": [category_id]}],
-                        "keyword": [{"name": keyword, "param": [keyword]}]
+                        "startDate": current_start.strftime('%Y-%m-%d'),"endDate": current_end.strftime('%Y-%m-%d'), "timeUnit": "date",
+                        "category": [{"name": keyword, "param": [category_id]}], "keyword": [{"name": keyword, "param": [keyword]}]
                     })
-                    
                     shop_res = call_naver_api("https://openapi.naver.com/v1/datalab/shopping/categories", body_shop, naver_keys)
-                    if shop_res and shop_res.get('results'):
+                    if shop_res and shop_res.get('results') and shop_res['results'][0]['data']:
                         df_shop = pd.DataFrame(shop_res['results'][0]['data'])
-                        keyword_dfs.append(df_shop.rename(columns={'period': '날짜', 'ratio': f'NaverShop_{keyword}'}))
-                else:
-                    st.sidebar.info(f"'{keyword}'에 대한 쇼핑인사이트 카테고리 정보가 없어 검색 트렌드만 조회합니다.")
+                        if not df_shop.empty and 'period' in df_shop.columns:
+                            keyword_dfs.append(df_shop.rename(columns={'period': '날짜', 'ratio': f'NaverShop_{keyword}'}))
 
-            if keyword_dfs:
-                for df in keyword_dfs:
-                    df['날짜'] = pd.to_datetime(df['날짜'])
-                merged_df = reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), keyword_dfs)
-                all_data.append(merged_df)
+                if keyword_dfs:
+                    for df in keyword_dfs: df['날짜'] = pd.to_datetime(df['날짜'])
+                    merged_df = reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), keyword_dfs)
+                    all_data_chunk.append(merged_df)
+            
+            if all_data_chunk:
+                chunk_df = reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), all_data_chunk)
+                new_data_list.append(chunk_df)
 
-    if not all_data: 
-        return pd.DataFrame()
+            current_start = current_end + timedelta(days=1)
+
+    # 4. 새로 가져온 데이터가 있다면, 캐시에 저장하고 기존 데이터와 통합
+    if new_data_list:
+        df_new = pd.concat(new_data_list, ignore_index=True).sort_values(by='날짜').reset_index(drop=True)
         
-    return reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), all_data)
+        # BigQuery에 쓰기 전에 '날짜' 열만 있는 빈 데이터프레임 제거
+        if not df_cache.empty:
+            df_combined = pd.concat([df_cache, df_new], ignore_index=True)
+        else:
+            df_combined = df_new
+
+        df_combined.drop_duplicates(subset=['날짜'], keep='last', inplace=True)
+        
+        st.sidebar.info(f"'{table_id}' 테이블에 새로운 데이터 저장 중...")
+        pandas_gbq.to_gbq(df_combined, full_table_id, project_id=project_id, if_exists="replace", credentials=client._credentials)
+        st.sidebar.success("캐시 업데이트 완료.")
+        df_final = df_combined
+    else:
+        df_final = df_cache
+
+    # 5. 사용자가 요청한 기간에 맞춰 최종 데이터 반환
+    if df_final.empty:
+        return pd.DataFrame()
+    
+    return df_final[(df_final['날짜'] >= start_date) & (df_final['날짜'] <= end_date)].reset_index(drop=True)
 
 def fetch_kamis_data(client, item_info, start_date, end_date, kamis_keys):
     """KAMIS에서 기간별 도매 가격 데이터를 한 번의 API 호출로 가져옵니다."""
