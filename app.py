@@ -696,36 +696,56 @@ with tab4:
 with tab5:
     st.header("시계열 분해 및 예측 (by Prophet)")
     final_df = st.session_state.get('final_df', pd.DataFrame())
+
     if not final_df.empty:
-        forecast_col = st.selectbox("예측 대상 변수 선택", final_df.columns)
-        if forecast_col:
+        forecast_col = st.selectbox("예측 대상 변수 선택", final_df.columns, key="forecast_select")
+
+        # 예측 실행 버튼 추가
+        if st.button("📈 선택한 변수로 예측 실행하기"):
             ts_data = final_df[[forecast_col]].dropna()
             if len(ts_data) < 24:
                 st.warning(f"시계열 분석을 위해 최소 24주 이상의 데이터가 필요합니다. 현재 데이터: {len(ts_data)}주")
             else:
-                st.subheader(f"'{forecast_col}' 시계열 분해")
-                period = 52 if len(ts_data) >= 104 else int(len(ts_data) / 2)
-                decomposition = seasonal_decompose(ts_data[forecast_col], model='additive', period=period)
-                
-                fig_decompose = go.Figure()
-                fig_decompose.add_trace(go.Scatter(x=decomposition.observed.index, y=decomposition.observed, mode='lines', name='Observed'))
-                fig_decompose.add_trace(go.Scatter(x=decomposition.trend.index, y=decomposition.trend, mode='lines', name='Trend'))
-                fig_decompose.add_trace(go.Scatter(x=decomposition.seasonal.index, y=decomposition.seasonal, mode='lines', name='Seasonal'))
-                st.plotly_chart(fig_decompose, use_container_width=True)
+                with st.spinner(f"'{forecast_col}'에 대한 예측 모델을 학습 중입니다..."):
+                    # --- 시계열 분해 ---
+                    st.subheader(f"'{forecast_col}' 시계열 분해")
+                    period = 52 if len(ts_data) >= 104 else max(4, int(len(ts_data) / 2))
+                    decomposition = seasonal_decompose(ts_data[forecast_col], model='additive', period=period)
+                    
+                    fig_decompose = go.Figure()
+                    fig_decompose.add_trace(go.Scatter(x=decomposition.observed.index, y=decomposition.observed, mode='lines', name='Observed'))
+                    fig_decompose.add_trace(go.Scatter(x=decomposition.trend.index, y=decomposition.trend, mode='lines', name='Trend'))
+                    fig_decompose.add_trace(go.Scatter(x=decomposition.seasonal.index, y=decomposition.seasonal, mode='lines', name='Seasonal'))
+                    # 결과를 세션 상태에 저장
+                    st.session_state['fig_decompose'] = fig_decompose
 
-                st.subheader(f"'{forecast_col}' 미래 12주 예측")
-                prophet_df = ts_data.reset_index().rename(columns={'날짜': 'ds', forecast_col: 'y'})
-                
-                m = Prophet()
-                m.fit(prophet_df)
-                future = m.make_future_dataframe(periods=12, freq='W')
-                forecast = m.predict(future)
+                    # --- Prophet 예측 ---
+                    st.subheader(f"'{forecast_col}' 미래 12주 예측")
+                    prophet_df = ts_data.reset_index().rename(columns={'날짜': 'ds', forecast_col: 'y'})
+                    
+                    m = Prophet()
+                    m.fit(prophet_df)
+                    future = m.make_future_dataframe(periods=12, freq='W')
+                    forecast = m.predict(future)
 
-                fig_forecast = plot_plotly(m, forecast)
-                fig_forecast.update_layout(title=f"'{forecast_col}' 미래 예측", xaxis_title='날짜', yaxis_title='예측값')
-                st.plotly_chart(fig_forecast, use_container_width=True)
-                
-                st.write("#### 예측 데이터 테이블")
-                st.dataframe(forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(12))
+                    fig_forecast = plot_plotly(m, forecast)
+                    fig_forecast.update_layout(title=f"'{forecast_col}' 미래 예측", xaxis_title='날짜', yaxis_title='예측값')
+                    
+                    # 결과를 세션 상태에 저장
+                    st.session_state['fig_forecast'] = fig_forecast
+                    st.session_state['forecast_data'] = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(12)
+        
+        # --- 저장된 결과 표시 ---
+        # 버튼을 누른 후, 다른 위젯과 상호작용해도 결과가 사라지지 않도록 함
+        if 'fig_decompose' in st.session_state:
+            st.subheader("시계열 분해 결과")
+            st.plotly_chart(st.session_state['fig_decompose'], use_container_width=True)
+
+        if 'fig_forecast' in st.session_state and 'forecast_data' in st.session_state:
+            st.subheader("미래 예측 결과")
+            st.plotly_chart(st.session_state['fig_forecast'], use_container_width=True)
+            st.write("#### 예측 데이터 테이블")
+            st.dataframe(st.session_state['forecast_data'])
+
     else:
         st.info("4번 탭에서 데이터가 통합되어야 예측을 수행할 수 있습니다.")
