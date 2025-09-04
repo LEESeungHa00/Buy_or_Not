@@ -4,7 +4,7 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import reduce
 import json
 import urllib.request
@@ -245,7 +245,7 @@ def fetch_robust_news_data(client, keywords, models):
                 "Keyword": subset.loc[i,"Keyword"],
                 "Language": lang,
                 "Sentiment": score,
-                "InsertedAt": datetime.now(datetime.UTC)
+                "InsertedAt": datetime.now(timezone.utc)
             })
     final_df = pd.DataFrame(rows)
     if client is not None and not final_df.empty:
