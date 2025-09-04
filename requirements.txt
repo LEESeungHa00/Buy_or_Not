@@ -16,5 +16,4 @@ statsmodels
 prophet
 feedparser
 torch
-captum
 lxml[html_clean]
