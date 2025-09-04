@@ -1,4 +1,4 @@
-# requirements.txt (New Final Version)
+--extra-index-url https://download.pytorch.org/whl/cpu
 streamlit
 pandas
 numpy
@@ -15,4 +15,6 @@ prophet
 feedparser
 lxml[html_clean]
 google-cloud-bigquery-storage
-google-cloud-language
+torch
+transformers
+sentencepiece
