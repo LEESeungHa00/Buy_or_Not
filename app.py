@@ -341,12 +341,12 @@ def call_naver_api(url, body, naver_keys):
 
 @st.cache_data(ttl=3600)
 @st.cache_data(ttl=3600)
-def fetch_naver_trends_data(client, keywords, start_date, end_date, naver_keys):
+def fetch_naver_trends_data(_client, keywords, start_date, end_date, naver_keys):
     """
     BigQuery 캐시를 활용하여 네이버 데이터랩(검색어, 쇼핑인사이트) 데이터를
     3개월 이상 긴 기간에 대해 가져옵니다.
     """
-    project_id = client.project
+    project_id = _client.project
     dataset_id = BQ_DATASET
     table_id = BQ_TABLE_NAVER
     full_table_id = f"{project_id}.{dataset_id}.{table_id}"
@@ -355,7 +355,7 @@ def fetch_naver_trends_data(client, keywords, start_date, end_date, naver_keys):
     try:
         # 특정 키워드에 대한 데이터만 필터링하여 가져오기
         all_cols_query = f"SELECT column_name FROM `{project_id}.{dataset_id}.INFORMATION_SCHEMA.COLUMNS` WHERE table_name = '{table_id}'"
-        all_cols = [row['column_name'] for row in client.query(all_cols_query).result()]
+        all_cols = [row['column_name'] for row in _client.query(all_cols_query).result()]
         
         keyword_cols = ['날짜']
         for kw in keywords:
