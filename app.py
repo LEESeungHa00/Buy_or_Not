@@ -454,7 +454,7 @@ def fetch_naver_trends_data(_client, keywords, start_date, end_date, naver_keys)
         df_combined.drop_duplicates(subset=['날짜'], keep='last', inplace=True)
         
         st.sidebar.info(f"'{table_id}' 테이블에 새로운 데이터 저장 중...")
-        pandas_gbq.to_gbq(df_combined, full_table_id, project_id=project_id, if_exists="replace", credentials=client._credentials)
+        pandas_gbq.to_gbq(df_combined, full_table_id, project_id=project_id, if_exists="replace", credentials=_client._credentials)
         st.sidebar.success("캐시 업데이트 완료.")
         df_final = df_combined
     else:
