@@ -35,21 +35,21 @@
 <div align="center">
 <br>
 <strong>Core & Visualization</strong><br>
-<img src="https://www.google.com/search?q=https://img.shields.io/badge/Python-3776AB%3Fstyle%3Dfor-the-badge%26logo%3Dpython%26logoColor%3Dwhite" />
-<img src="https://www.google.com/search?q=https://img.shields.io/badge/Streamlit-FF4B4B%3Fstyle%3Dfor-the-badge%26logo%3Dstreamlit%26logoColor%3Dwhite" />
-<img src="https://www.google.com/search?q=https://img.shields.io/badge/Pandas-150458%3Fstyle%3Dfor-the-badge%26logo%3Dpandas%26logoColor%3Dwhite" />
-<img src="https://www.google.com/search?q=https://img.shields.io/badge/Plotly-3F4F75%3Fstyle%3Dfor-the-badge%26logo%3Dplotly%26logoColor%3Dwhite" />
+<img src="https://www.google.com/search?q=https://img.shields.io/badge/Python-3776AB%3Fstyle%3Dfor-the-badge%26logo%3Dpython%26logoColor%3Dwhite" alt="Python Badge"/>
+<img src="https://www.google.com/search?q=https://img.shields.io/badge/Streamlit-FF4B4B%3Fstyle%3Dfor-the-badge%26logo%3Dstreamlit%26logoColor%3Dwhite" alt="Streamlit Badge"/>
+<img src="https://www.google.com/search?q=https://img.shields.io/badge/Pandas-150458%3Fstyle%3Dfor-the-badge%26logo%3Dpandas%26logoColor%3Dwhite" alt="Pandas Badge"/>
+<img src="https://www.google.com/search?q=https://img.shields.io/badge/Plotly-3F4F75%3Fstyle%3Dfor-the-badge%26logo%3Dplotly%26logoColor%3Dwhite" alt="Plotly Badge"/>
 <br><br>
 <strong>Data Storage & Fetching</strong><br>
-<img src="https://www.google.com/search?q=https://img.shields.io/badge/Google%2520BigQuery-4285F4%3Fstyle%3Dfor-the-badge%26logo%3Dgoogle-bigquery%26logoColor%3Dwhite" />
-<img src="https://www.google.com/search?q=https://img.shields.io/badge/pandas_gbq-D72D49%3Fstyle%3Dfor-the-badge%26logo%3Dgoogle-cloud%26logoColor%3Dwhite" />
-<img src="https://www.google.com/search?q=https://img.shields.io/badge/Naver%2520API-03C75A%3Fstyle%3Dfor-the-badge%26logo%3Dnaver%26logoColor%3Dwhite" />
+<img src="https://www.google.com/search?q=https://img.shields.io/badge/Google%2520BigQuery-4285F4%3Fstyle%3Dfor-the-badge%26logo%3Dgoogle-bigquery%26logoColor%3Dwhite" alt="BigQuery Badge"/>
+<img src="https://www.google.com/search?q=https://img.shields.io/badge/pandas_gbq-D72D49%3Fstyle%3Dfor-the-badge%26logo%3Dgoogle-cloud%26logoColor%3Dwhite" alt="Pandas GBQ Badge"/>
+<img src="https://www.google.com/search?q=https://img.shields.io/badge/Naver%2520API-03C75A%3Fstyle%3Dfor-the-badge%26logo%3Dnaver%26logoColor%3Dwhite" alt="Naver API Badge"/>
 <br><br>
 <strong>AI & Analysis</strong><br>
-<img src="https://www.google.com/search?q=https://img.shields.io/badge/Transformers-FFD21E%3Fstyle%3Dfor-the-badge%26logo%3Dhugging-face%26logoColor%3Dblack" />
-<img src="https://www.google.com/search?q=https://img.shields.io/badge/Prophet-0078D4%3Fstyle%3Dfor-the-badge%26logo%3Dmeta%26logoColor%3Dwhite" />
-<img src="https://www.google.com/search?q=https://img.shields.io/badge/Scikit--learn-F7931E%3Fstyle%3Dfor-the-badge%26logo%3Dscikit-learn%26logoColor%3Dwhite" />
-<img src="https://www.google.com/search?q=https://img.shields.io/badge/Statsmodels-1A568C%3Fstyle%3Dfor-the-badge%26logo%3Dpython%26logoColor%3Dwhite" />
+<img src="https://www.google.com/search?q=https://img.shields.io/badge/Transformers-FFD21E%3Fstyle%3Dfor-the-badge%26logo%3Dhugging-face%26logoColor%3Dblack" alt="Transformers Badge"/>
+<img src="https://www.google.com/search?q=https://img.shields.io/badge/Prophet-0078D4%3Fstyle%3Dfor-the-badge%26logo%3Dmeta%26logoColor%3Dwhite" alt="Prophet Badge"/>
+<img src="https://www.google.com/search?q=https://img.shields.io/badge/Scikit--learn-F7931E%3Fstyle%3Dfor-the-badge%26logo%3Dscikit-learn%26logoColor%3Dwhite" alt="Scikit-learn Badge"/>
+<img src="https://www.google.com/search?q=https://img.shields.io/badge/Statsmodels-1A568C%3Fstyle%3Dfor-the-badge%26logo%3Dpython%26logoColor%3Dwhite" alt="Statsmodels Badge"/>
 <br>
 </div>
 
