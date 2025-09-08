@@ -7,8 +7,6 @@
 
 수입 데이터, 국내 도매가, 뉴스 기사, 검색 트렌드 등 파편화된 데이터를 Google BigQuery에 통합하고, 상관관계 분석과 AI 예측 모델을 통해 미래 시장을 예측하는 인사이트 대시보드입니다.
 
-<br>
-
 🎯 The Problem
 데이터 기반의 정확한 수입 전략을 수립하는 데에는 다음과 같은 여러 어려움이 있었습니다.
 
@@ -19,8 +17,6 @@
 📉 숨겨진 관계 파악의 어려움: 온라인 검색량이나 특정 뉴스 이슈가 실제 수입량과 단가에 얼마나, 그리고 언제 영향을 미치는지 파악하기 힘들었습니다.
 
 🔮 미래 예측의 부재: 미래의 수요와 가격 변동을 예측할 수 없어, 재고 관리와 가격 협상에서 불리한 위치에 놓이는 경우가 많았습니다.
-
-<br>
 
 💡 The Solution
 이러한 문제들을 해결하기 위해, 다양한 데이터 소스를 실시간으로 연동하고 AI 분석 기능을 탑재한 통합 분석 대시보드를 구축했습니다.
@@ -35,20 +31,27 @@
 
 🔭 AI 미래 예측 모델: 수집된 모든 데이터를 바탕으로 **시계열을 분해(Decomposition)**하여 데이터의 구조를 파악하고, Prophet 예측 모델을 통해 미래의 수입량, 단가 등을 예측하여 전략 수립을 지원합니다.
 
-<br>
-
 🛠️ Tech Stack
-Core: Python, Streamlit, Pandas
-
-Data Storage: Google BigQuery
-
-Data Fetching: pandas-gbq, newspaper3k, feedparser, Naver API
-
-AI & Analysis: transformers (Hugging Face), Prophet (statsmodels), scikit-learn
-
-Visualization: Plotly Express
-
+<div align="center">
 <br>
+<strong>Core & Visualization</strong><br>
+<img src="https://www.google.com/search?q=https://img.shields.io/badge/Python-3776AB%3Fstyle%3Dfor-the-badge%26logo%3Dpython%26logoColor%3Dwhite" />
+<img src="https://www.google.com/search?q=https://img.shields.io/badge/Streamlit-FF4B4B%3Fstyle%3Dfor-the-badge%26logo%3Dstreamlit%26logoColor%3Dwhite" />
+<img src="https://www.google.com/search?q=https://img.shields.io/badge/Pandas-150458%3Fstyle%3Dfor-the-badge%26logo%3Dpandas%26logoColor%3Dwhite" />
+<img src="https://www.google.com/search?q=https://img.shields.io/badge/Plotly-3F4F75%3Fstyle%3Dfor-the-badge%26logo%3Dplotly%26logoColor%3Dwhite" />
+<br><br>
+<strong>Data Storage & Fetching</strong><br>
+<img src="https://www.google.com/search?q=https://img.shields.io/badge/Google%2520BigQuery-4285F4%3Fstyle%3Dfor-the-badge%26logo%3Dgoogle-bigquery%26logoColor%3Dwhite" />
+<img src="https://www.google.com/search?q=https://img.shields.io/badge/pandas_gbq-D72D49%3Fstyle%3Dfor-the-badge%26logo%3Dgoogle-cloud%26logoColor%3Dwhite" />
+<img src="https://www.google.com/search?q=https://img.shields.io/badge/Naver%2520API-03C75A%3Fstyle%3Dfor-the-badge%26logo%3Dnaver%26logoColor%3Dwhite" />
+<br><br>
+<strong>AI & Analysis</strong><br>
+<img src="https://www.google.com/search?q=https://img.shields.io/badge/Transformers-FFD21E%3Fstyle%3Dfor-the-badge%26logo%3Dhugging-face%26logoColor%3Dblack" />
+<img src="https://www.google.com/search?q=https://img.shields.io/badge/Prophet-0078D4%3Fstyle%3Dfor-the-badge%26logo%3Dmeta%26logoColor%3Dwhite" />
+<img src="https://www.google.com/search?q=https://img.shields.io/badge/Scikit--learn-F7931E%3Fstyle%3Dfor-the-badge%26logo%3Dscikit-learn%26logoColor%3Dwhite" />
+<img src="https://www.google.com/search?q=https://img.shields.io/badge/Statsmodels-1A568C%3Fstyle%3Dfor-the-badge%26logo%3Dpython%26logoColor%3Dwhite" />
+<br>
+</div>
 
 🚀 Getting Started
 Prerequisites
