@@ -1,93 +1,76 @@
+📈 AI 기반 수입 데이터 분석 및 예측 대시보드
+<div align="center">
+<img src="https://www.google.com/search?q=https://placehold.co/800x250/0078D4/FFFFFF%3Ftext%3DAI%2BTrade%2BData%2BDashboard" alt="Dashboard Banner">
+</div>
 
+<br>
 
-````markdown
-# 📈 수입량 및 가격 예측 AI 대시보드
+수입 데이터, 국내 도매가, 뉴스 기사, 검색 트렌드 등 파편화된 데이터를 Google BigQuery에 통합하고, 상관관계 분석과 AI 예측 모델을 통해 미래 시장을 예측하는 인사이트 대시보드입니다.
 
-다양한 외부 데이터(뉴스, 검색 트렌드, 공공 데이터 등)를 종합하여 특정 품목의 미래 수입량과 가격을 예측하고, 시장 인사이트를 도출하는 머신러닝 기반의 웹 대시보드입니다.
+<br>
 
-## ✨ 주요 기능
+🎯 The Problem
+데이터 기반의 정확한 수입 전략을 수립하는 데에는 다음과 같은 여러 어려움이 있었습니다.
 
-* **통합 데이터 분석**: 수입 데이터, 국내 도소매가, 온라인 검색량, 뉴스 데이터를 종합하여 시계열 트렌드를 시각화합니다.
-* **미래 예측**: XGBoost, LightGBM 등 머신러닝 모델을 활용하여 미래의 수입량과 수입 가격을 예측합니다.
-* **심층 분석**:
-  * **품목 분석**: 특정 품목의 주요 지표(단가, 수요, 감성 지수) 간의 상관관계를 분석합니다.
-  * **수입사 분석**: 주요 수입사들의 품목별 점유율과 가격 경쟁력을 비교 분석합니다.
-* **자동화된 파이프라인**: 데이터 수집, 전처리, 모델링, 시각화까지의 과정을 파이썬 코드로 자동화합니다.
+🗂️ 파편화된 데이터: 수입 실적, 국내 시장 가격, 뉴스, 소비자 관심도 등 분석에 필요한 데이터가 여러 곳에 흩어져 있어 통합적인 분석이 어려웠습니다.
 
-## 🏗️ 시스템 아키텍처
+🤔 직감에 의존한 의사결정: 명확한 데이터 근거 없이 과거의 경험이나 직감에 의존하여 다음 분기의 수입량과 가격 전략을 수립했습니다.
 
-이 프로젝트는 데이터 수집, 전처리, 모델링, 시각화의 4단계 파이프라인으로 구성되어 있습니다. 모든 데이터는 **SQLite** 데이터베이스에 통합 관리하여 효율성을 높였습니다.
+📉 숨겨진 관계 파악의 어려움: 온라인 검색량이나 특정 뉴스 이슈가 실제 수입량과 단가에 얼마나, 그리고 언제 영향을 미치는지 파악하기 힘들었습니다.
 
-## 🛠️ 기술 스택
+🔮 미래 예측의 부재: 미래의 수요와 가격 변동을 예측할 수 없어, 재고 관리와 가격 협상에서 불리한 위치에 놓이는 경우가 많았습니다.
 
-* **언어**: Python 3.9+
-* **데이터 처리/분석**: Pandas, Numpy
-* **머신러닝**: Scikit-learn, XGBoost, LightGBM
-* **데이터베이스**: SQLite3
-* **웹 프레임워크/시각화**: Streamlit, Plotly Express
-* **데이터 수집** : Requests, BeautifulSoup4, Pytrends
+<br>
 
-## 🚀 시작하기
+💡 The Solution
+이러한 문제들을 해결하기 위해, 다양한 데이터 소스를 실시간으로 연동하고 AI 분석 기능을 탑재한 통합 분석 대시보드를 구축했습니다.
 
-### 1. 프로젝트 복제
+⚙️ 빅데이터 파이프라인 구축: 수십만 건의 수출입 데이터를 Google BigQuery에 저장하여, 대용량 데이터도 빠르고 안정적으로 처리하는 기반을 마련했습니다.
 
-```bash
-git clone [https://github.com/your-username/your-repository-name.git](https://github.com/your-username/your-repository-name.git)
-cd your-repository-name
-````
+🤖 자동화된 외부 데이터 연동: KAMIS(농산물 가격), 네이버 데이터랩(검색/쇼핑 트렌드) 등 다양한 외부 데이터를 API로 자동 연동하고, 그 결과를 BigQuery에 캐싱하여 반복 조회 시 속도를 극대화했습니다.
 
-### 2\. 가상환경 생성 및 활성화
+🧠 AI 기반 뉴스 감성 분석: 금융/경제 뉴스에 특화된 AI 모델(KR-FinBERT)을 활용해 실시간으로 뉴스 여론을 분석하고, 나아가 AI가 왜 그런 판단을 내렸는지 근거가 된 핵심 단어까지 시각화(XAI)합니다.
 
-```bash
-# Windows
-python -m venv venv
-venv\Scripts\activate
+🔗 심층 상관관계 분석: 히트맵과 시차(Lag) 분석을 통해, 선물 가격이나 뉴스 감성 점수와 같은 선행 지표가 미래의 수입량/단가에 미치는 숨겨진 선후행 관계를 명확하게 진단합니다.
 
-# macOS & Linux
-python3 -m venv venv
-source venv/bin/activate
-```
+🔭 AI 미래 예측 모델: 수집된 모든 데이터를 바탕으로 **시계열을 분해(Decomposition)**하여 데이터의 구조를 파악하고, Prophet 예측 모델을 통해 미래의 수입량, 단가 등을 예측하여 전략 수립을 지원합니다.
 
-### 3\. 필요 라이브러리 설치
+<br>
 
-```bash
+🛠️ Tech Stack
+Core: Python, Streamlit, Pandas
+
+Data Storage: Google BigQuery
+
+Data Fetching: pandas-gbq, newspaper3k, feedparser, Naver API
+
+AI & Analysis: transformers (Hugging Face), Prophet (statsmodels), scikit-learn
+
+Visualization: Plotly Express
+
+<br>
+
+🚀 Getting Started
+Prerequisites
+Python 3.9+
+
+Google Cloud Platform 계정 및 secrets.toml 설정 (아래 참조)
+
+Naver, KAMIS 등 외부 API 키
+
+Installation & Setup
+저장소 복제 (Clone the repository):
+
+git clone [저장소 URL]
+cd [프로젝트 폴더]
+
+필요한 라이브러리 설치:
+
 pip install -r requirements.txt
-```
 
-### 4\. 폴더 구조 설정
+Google Cloud 인증 설정:
+프로젝트 폴더 내에 .streamlit/secrets.toml 파일을 생성하고, BigQuery 연동 설정 안내서에 따라 서비스 계정 키 내용을 붙여넣습니다.
 
-프로젝트 루트 디렉토리에 아래와 같이 폴더를 생성해주세요.
+Streamlit 앱 실행:
 
-```text
-/your-repository-name
-|-- /data/              # DB 파일, 초기 CSV 데이터 등 위치
-|-- /models/            # 학습된 모델 파일(.json) 저장
-|-- /config/            # 키워드 매핑 파일(keywords.json) 등 위치
-|-- /src/               # 파이썬 소스코드
-|-- app.py              # Streamlit 실행 파일
-|-- ...
-```
-
-### 5\. Streamlit 앱 실행
-
-```bash
-streamlit run app.py
-```
-
-브라우저에서 `http://localhost:8501` 주소로 접속하여 대시보드를 확인합니다.
-
-## 📁 파일 구조
-
-```text
-.
-├── .gitignore
-├── README.md
-├── requirements.txt
-├── app.py
-└── src
-    ├── __init__.py
-    ├── data_processing.py
-    └── modeling.py
-```
-
-
+streamlit run data_explorer_app.py
