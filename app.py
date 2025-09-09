@@ -1,5 +1,3 @@
-# total_ml_pred.py  —  2025-09-09 업데이트
-# 요청 반영: 다중 모델 교차 분석, AI 트렌드 요약 카드, Naver 중심 연동, newspaper3k 안정화, 메인화면 초기화/재로딩 버튼
 
 import streamlit as st
 import pandas as pd
