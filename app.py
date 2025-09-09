@@ -17,7 +17,10 @@ from urllib.parse import quote
 from statsmodels.tsa.seasonal import seasonal_decompose
 from prophet import Prophet
 from prophet.plot import plot_plotly
+
+# Transformers / HuggingFace
 from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
+from huggingface_hub import login as hf_login
 
 # (NEW) optional: robust article text fetch
 try:
@@ -26,10 +29,15 @@ try:
 except Exception:
     _HAS_NEWSPAPER = False
 
-# --- 1. Constants and Configuration ---
+# ----------------------------
+#  Configuration / Constants
+# ----------------------------
+st.set_page_config(layout="wide")
+st.title("📊 데이터 탐색 및 통합 분석 대시보드 (다중 AI 감성 & Naver 중심)")
+
 BQ_DATASET = "data_explorer"
 BQ_TABLE_NAVER = "naver_trends_cache"
-BQ_TABLE_NEWS = "news_sentiment_finbert"  # 기존 테이블명 유지 (스키마 확장)
+BQ_TABLE_NEWS = "news_sentiment_finbert"
 
 KAMIS_FULL_DATA = {
     '쌀': {'cat_code': '100', 'item_code': '111', 'kinds': {'20kg': '01', '백미': '02'}},
@@ -42,7 +50,9 @@ KAMIS_FULL_DATA = {
     '고등어': {'cat_code': '600', 'item_code': '611', 'kinds': {'생선': '01', '냉동': '02'}},
 }
 
-# --- 2. GCP Connection and Helper Functions ---
+# ----------------------------
+#  Helpers: BigQuery + Naver + KAMIS
+# ----------------------------
 @st.cache_resource
 def get_bq_connection():
     try:
@@ -53,62 +63,6 @@ def get_bq_connection():
     except Exception as e:
         st.error(f"Google BigQuery 연결 실패: secrets.toml을 확인하세요. 오류: {e}")
         return None
-
-def _safe_update_news_table_schema(client):
-    """기존 테이블에 다중 모델 컬럼을 추가(없을 경우)"""
-    try:
-        project_id = client.project
-        table_id = f"{project_id}.{BQ_DATASET}.{BQ_TABLE_NEWS}"
-        table = client.get_table(table_id)
-        existing = {s.name for s in table.schema}
-        add_fields = []
-        wanted = [
-            ("FinBERT_Sentiment", "FLOAT"),
-            ("FinBERT_Label", "STRING"),
-            ("KLUE_Sentiment", "FLOAT"),
-            ("KLUE_Label", "STRING"),
-            ("NSMC_Sentiment", "FLOAT"),
-            ("NSMC_Label", "STRING"),
-            ("RawUrl", "STRING"),
-        ]
-        for name, t in wanted:
-            if name not in existing:
-                add_fields.append(bigquery.SchemaField(name, t))
-        if add_fields:
-            new_schema = list(table.schema) + add_fields
-            table.schema = new_schema
-            client.update_table(table, ["schema"])
-    except Exception:
-        pass  # 스키마 확장은 실패해도 앱 동작에는 치명적이지 않게
-
-def ensure_news_table_exists(client):
-    project_id = client.project
-    full_table_id = f"{project_id}.{BQ_DATASET}.{BQ_TABLE_NEWS}"
-    try:
-        client.get_table(full_table_id)
-        _safe_update_news_table_schema(client)
-    except Exception:
-        st.write(f"뉴스 분석 테이블 '{full_table_id}'을 새로 생성합니다.")
-        schema = [
-            bigquery.SchemaField("날짜", "DATE"),
-            bigquery.SchemaField("Title", "STRING"),
-            bigquery.SchemaField("Keyword", "STRING"),
-            # (KEEP for backward)
-            bigquery.SchemaField("Sentiment", "FLOAT"),
-            bigquery.SchemaField("Label", "STRING"),
-            bigquery.SchemaField("InsertedAt", "TIMESTAMP"),
-            # (NEW) multi-model fields
-            bigquery.SchemaField("FinBERT_Sentiment", "FLOAT"),
-            bigquery.SchemaField("FinBERT_Label", "STRING"),
-            bigquery.SchemaField("KLUE_Sentiment", "FLOAT"),
-            bigquery.SchemaField("KLUE_Label", "STRING"),
-            bigquery.SchemaField("NSMC_Sentiment", "FLOAT"),
-            bigquery.SchemaField("NSMC_Label", "STRING"),
-            bigquery.SchemaField("RawUrl", "STRING"),
-        ]
-        table = bigquery.Table(full_table_id, schema=schema)
-        client.create_table(table)
-        st.success(f"테이블 '{BQ_TABLE_NEWS}' 생성 완료.")
 
 def call_naver_api(url, body, naver_keys):
     try:
@@ -124,96 +78,199 @@ def call_naver_api(url, body, naver_keys):
         st.error(f"Naver API 오류 발생: {e}")
         return None
 
-# --- 3. Sentiment Models (Multi-model) ---
+def fetch_kamis_data(_client, item_info, start_date, end_date, kamis_keys):
+    start_str, end_str = start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')
+    url = (f"http://www.kamis.or.kr/service/price/xml.do?action=periodWholesaleProductList"
+           f"&p_product_cls_code=01&p_startday={start_str}&p_endday={end_str}"
+           f"&p_item_category_code={item_info['cat_code']}&p_item_code={item_info['item_code']}&p_kind_code={item_info['kind_code']}"
+           f"&p_product_rank_code={item_info['rank_code']}&p_convert_kg_yn=Y"
+           f"&p_cert_key={kamis_keys['key']}&p_cert_id={kamis_keys['id']}&p_returntype=json")
+    try:
+        response = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0 KAMISClient/1.0"})
+        if response.status_code == 200 and "data" in response.json() and "item" in response.json()["data"]:
+            price_data = response.json()["data"]["item"]
+            if not price_data:
+                return pd.DataFrame()
+            df_new = pd.DataFrame(price_data)[['regday', 'price']].rename(columns={'regday': '날짜', 'price': '도매가격_원'})
+            def format_kamis_date(date_str):
+                processed_str = date_str.replace('/', '-')
+                if processed_str.count('-') == 1:
+                    return f"{start_date.year}-{processed_str}"
+                return processed_str
+            df_new['날짜'] = pd.to_datetime(df_new['날짜'].apply(format_kamis_date))
+            df_new['도매가격_원'] = pd.to_numeric(df_new['도매가격_원'].str.replace(',', ''), errors='coerce')
+            return df_new
+    except Exception as e:
+        st.sidebar.error(f"KAMIS API 호출 중 오류: {e}")
+    return pd.DataFrame()
+
+# ----------------------------
+#  HuggingFace: 로그인 + 안전한 모델 로드
+# ----------------------------
+# 토큰 읽기 (Streamlit Secrets에 huggingface.token 으로 저장했다고 가정)
+hf_token = None
+try:
+    hf_token = st.secrets["huggingface"]["token"]
+except Exception:
+    hf_token = None
+
+if hf_token:
+    try:
+        hf_login(token=hf_token)  # 로그인 시도 (읽기 전용 토큰이면 OK)
+        st.sidebar.success("HuggingFace token 적용됨.")
+    except Exception as e:
+        st.sidebar.warning(f"HuggingFace 로그인 실패: {e}")
+else:
+    st.sidebar.info("HuggingFace token이 secrets에 없습니다. private 모델 사용 시 필요합니다.")
+
+# 기본 추천 모델 (사용자가 사이드바에서 덮어쓸 수 있음)
+DEFAULT_MODEL_IDS = {
+    "finbert": "snunlp/KR-FinBERT-SC",                      # 금융 특화 (분류 모델)
+    "elite": "nlptown/bert-base-multilingual-uncased-sentiment",  # 범용 다국어 감성(1~5 star)
+    "product": "heegyu/bert-nsmc"                            # 상품평(NSMC) 계열 (예: nsmc 학습 모델, 실패시 fallback)
+}
+
+# Sidebar: 모델 아이디 재정의 (사용자가 직접 입력 가능)
+st.sidebar.subheader("모델 설정 (원하지 않으면 기본 사용)")
+finbert_id = st.sidebar.text_input("금융 특화 모델 ID", DEFAULT_MODEL_IDS["finbert"])
+elite_id = st.sidebar.text_input("범용(엘리트) 모델 ID", DEFAULT_MODEL_IDS["elite"])
+product_id = st.sidebar.text_input("상품평 모델 ID", DEFAULT_MODEL_IDS["product"])
+USER_MODEL_IDS = {"finbert": finbert_id.strip() or DEFAULT_MODEL_IDS["finbert"],
+                  "elite": elite_id.strip() or DEFAULT_MODEL_IDS["elite"],
+                  "product": product_id.strip() or DEFAULT_MODEL_IDS["product"]}
+
 @st.cache_resource
-def load_models():
+def load_models(user_model_ids, token):
+    """안전하게 세 모델을 로드. 실패해도 앱이 멈추지 않도록 방어 처리."""
     models = {}
-    # 1) 금융 특화
-    try:
-        with st.spinner("모델 로드: KR-FinBERT ..."):
-            name = "snunlp/KR-FinBERT-SC"
-            tok = AutoTokenizer.from_pretrained(name)
-            mdl = AutoModelForSequenceClassification.from_pretrained(name)
-            models["finbert"] = pipeline("sentiment-analysis", model=mdl, tokenizer=tok)
-    except Exception as e:
-        st.warning(f"KR-FinBERT 로드 실패: {e}")
-        models["finbert"] = None
+    load_report = {}
+    for key, mid in user_model_ids.items():
+        models[key] = None
+        load_report[key] = {"model_id": mid, "loaded": False, "error": None}
 
-    # 2) 범용(klue/bert-base) — 미세조정 모델이 아니어 실패 가능 → 안전장치
-    try:
-        with st.spinner("모델 로드: KLUE/BERT (범용) ..."):
-            name = "klue/bert-base"
-            tok = AutoTokenizer.from_pretrained(name)
-            # text-classification 헤드가 없으면 AutoModelForSequenceClassification에서 실패할 수 있음
-            mdl = AutoModelForSequenceClassification.from_pretrained(name)
-            models["klue"] = pipeline("sentiment-analysis", model=mdl, tokenizer=tok)
-    except Exception as e:
-        st.warning(f"KLUE/BERT 로드 실패(범용): {e}")
-        models["klue"] = None
+        try:
+            # 1) 시도: AutoTokenizer + AutoModelForSequenceClassification (정상적으로 classification head 있을 때)
+            if token:
+                tok = AutoTokenizer.from_pretrained(mid, use_auth_token=token)
+                mdl = AutoModelForSequenceClassification.from_pretrained(mid, use_auth_token=token)
+            else:
+                tok = AutoTokenizer.from_pretrained(mid)
+                mdl = AutoModelForSequenceClassification.from_pretrained(mid)
 
-# 3) 범용 감성 분석 (KoELECTRA 기반 - NSMC)
-    try:
-        # KLUE(BERT) 모델과 교차 검증(앙상블)하기 위한 ELECTRA 아키텍처 모델
-        model_id = "jaehyeong/koelectra-base-v3-nsmc"
-        
-        with st.spinner(f"모델 로드: 범용 감성(KoELECTRA) ({model_id})..."):
-            
-            # 딕셔너리 키를 'koelectra_nsmc' 등으로 설정
-            models["koelectra_nsmc"] = pipeline("sentiment-analysis", model=model_id)
+            # pipeline으로 감성분석 객체 생성
+            pipe = pipeline("sentiment-analysis", model=mdl, tokenizer=tok)
+            models[key] = pipe
+            load_report[key]["loaded"] = True
+        except Exception as e1:
+            # 2) fallback: 직접 pipeline으로 모델 아이디를 넘겨 시도 (허브의 파이프라인 파일을 사용할 수 있는 경우)
+            try:
+                if token:
+                    pipe = pipeline("sentiment-analysis", model=mid, tokenizer=mid, use_auth_token=token)
+                else:
+                    pipe = pipeline("sentiment-analysis", model=mid, tokenizer=mid)
+                models[key] = pipe
+                load_report[key]["loaded"] = True
+            except Exception as e2:
+                # 로드 실패 — 경고 메시지 저장
+                load_report[key]["error"] = f"Primary error: {e1}; Fallback error: {e2}"
+                models[key] = None
 
-    except Exception as e:
-        st.warning(f"KoELECTRA 모델 로드 실패: {e}")
-        models["koelectra_nsmc"] = None
+    return models, load_report
 
-    return models
+models, model_load_report = load_models(USER_MODEL_IDS, hf_token)
 
+# 모델 로드 상태 UI 표시 (사이드바)
+st.sidebar.markdown("### 모델 로드 상태")
+for k, r in model_load_report.items():
+    if r["loaded"]:
+        st.sidebar.success(f"{k} OK — {r['model_id']}")
+    else:
+        st.sidebar.error(f"{k} 실패 — {r['model_id']}")
+        if r["error"]:
+            # show truncated error for debugging
+            st.sidebar.caption(str(r["error"])[:240])
+
+# ----------------------------
+#  표준화된 label -> score 변환 함수
+# ----------------------------
 def _label_score_to_signed(pred):
-    """Transformers 결과를 통일된 (-1~+1)로 정규화"""
+    """
+    다양한 파이프라인 출력 레이블을 -1 ~ +1 범위로 정규화
+    - 일반적: label contains 'NEG'/'POS' or 'negative'/'positive' -> score sign
+    - nlptown: labels like '1 star', '2 star' ... map to (-1 .. +1)
+    - fallback: neutral=0
+    """
     if pred is None:
         return 0.0, "neutral"
     lbl = str(pred.get("label", "")).lower()
     score = float(pred.get("score", 0.0))
-    if "neg" in lbl:  # negative
+    # nlptown style: '1 star'..'5 star'
+    if "star" in lbl:
+        try:
+            n = int(lbl.split()[0])
+            # map 1..5 -> -1..+1  (3 -> 0)
+            signed = (n - 3) / 2.0
+            label = "positive" if signed > 0 else ("negative" if signed < 0 else "neutral")
+            return float(signed), label
+        except Exception:
+            pass
+    # common labels
+    if any(x in lbl for x in ["neg", "negative", "bad", "부정"]):
         return -score, "negative"
-    if "pos" in lbl:  # positive
+    if any(x in lbl for x in ["pos", "positive", "good", "긍정"]):
         return +score, "positive"
-    if "neu" in lbl:
+    if "neu" in lbl or "neutral" in lbl:
         return 0.0, "neutral"
-    # 알 수 없는 레이블: 0 처리
-    return 0.0, lbl or "neutral"
+    # fallback: use score as magnitude, but unknown label -> assume positive if score>0.5
+    return (score if score <= 1 else 0.0), ("positive" if score >= 0.5 else "neutral")
 
-def analyze_sentiment_multi(texts, models):
-    """각 문장에 대해 세 모델 점수 동시 계산"""
+def analyze_sentiment_multi(texts, models_dict):
+    """
+    texts: list[str]
+    models_dict keys: 'finbert','elite','product' - pipeline objects or None
+    return: list of dicts with FinBERT_Sentiment etc.
+    """
     results = []
     if not texts:
         return results
-    # batch inference per model (성능)
+
+    # do batch calls for each model where possible
     preds = {}
-    for key in ["finbert", "klue", "nsmc"]:
-        clf = models.get(key)
-        if clf is None:
-            preds[key] = [None] * len(texts)
-            continue
-        try:
-            preds[key] = clf(texts)
-        except Exception:
-            preds[key] = [None] * len(texts)
+    for key in ["finbert", "elite", "product"]:
+        pipe = models_dict.get(key)
+        if pipe is None:
+            preds[key] = [None]*len(texts)
+        else:
+            try:
+                # some pipelines accept list->batch, some might error; wrap in try
+                preds[key] = pipe(texts)
+            except Exception:
+                # per-item fallback
+                tmp = []
+                for t in texts:
+                    try:
+                        tmp.append(pipe(t)[0])
+                    except Exception:
+                        tmp.append(None)
+                preds[key] = tmp
 
     for i, t in enumerate(texts):
-        finbert_s, finbert_l = _label_score_to_signed(preds["finbert"][i] if preds["finbert"] else None)
-        klue_s, klue_l = _label_score_to_signed(preds["klue"][i] if preds["klue"] else None)
-        nsmc_s, nsmc_l = _label_score_to_signed(preds["nsmc"][i] if preds["nsmc"] else None)
-        # 기존 단일 Sentiment/Label 필드 호환을 위해 FinBERT 중심 유지
+        fin_s, fin_l = _label_score_to_signed(preds["finbert"][i] if preds.get("finbert") else None)
+        el_s, el_l = _label_score_to_signed(preds["elite"][i] if preds.get("elite") else None)
+        pr_s, pr_l = _label_score_to_signed(preds["product"][i] if preds.get("product") else None)
         results.append({
-            "FinBERT_Sentiment": finbert_s, "FinBERT_Label": finbert_l,
-            "KLUE_Sentiment": klue_s, "KLUE_Label": klue_l,
-            "NSMC_Sentiment": nsmc_s, "NSMC_Label": nsmc_l,
-            "Sentiment": finbert_s, "Label": finbert_l
+            "FinBERT_Sentiment": fin_s, "FinBERT_Label": fin_l,
+            "Elite_Sentiment": el_s, "Elite_Label": el_l,
+            "Product_Sentiment": pr_s, "Product_Label": pr_l,
+            # 호환용 기존 필드 (FinBERT 중심)
+            "Sentiment": fin_s, "Label": fin_l
         })
     return results
 
+# ----------------------------
+#  뉴스 수집/분석 (강화된 안정성)
+# ----------------------------
 def _fetch_article_text(url):
-    """newspaper3k로 본문 확보 시도(안정화 옵션)"""
     if not _HAS_NEWSPAPER or not url:
         return ""
     try:
@@ -227,12 +284,11 @@ def _fetch_article_text(url):
     except Exception:
         return ""
 
-def get_news_with_multi_model_analysis(_bq_client, models, keyword, days_limit=7):
-    """RSS 기반 수집 + (가능시) 본문 fetch → 세 모델 동시 감성 분석 + BQ 캐시 저장"""
+def get_news_with_multi_model_analysis(_bq_client, models_dict, keyword, days_limit=7):
     project_id = _bq_client.project
     full_table_id = f"{project_id}.{BQ_DATASET}.{BQ_TABLE_NEWS}"
 
-    # 1) 캐시 조회
+    # cache 조회 (간편)
     try:
         time_limit = datetime.now(timezone.utc) - timedelta(days=days_limit)
         query = f"""
@@ -252,9 +308,7 @@ def get_news_with_multi_model_analysis(_bq_client, models, keyword, days_limit=7
         st.sidebar.success(f"✔️ '{keyword}' 최신 분석 결과를 캐시에서 로드했습니다.")
         return df_cache
 
-    st.sidebar.warning(f"'{keyword}' 최신 캐시 없음 → 새로 수집·분석합니다...")
-
-    # 2) RSS 수집 (Google News, 국내 설정)
+    # RSS 수집 (Google News)
     all_news = []
     rss_url = f"https://news.google.com/rss/search?q={quote(keyword)}&hl=ko&gl=KR&ceid=KR:ko"
     feed = feedparser.parse(rss_url)
@@ -269,11 +323,8 @@ def get_news_with_multi_model_analysis(_bq_client, models, keyword, days_limit=7
         except Exception:
             pub_date = datetime.utcnow().date()
 
-        # (NEW) 기사 본문 일부 확보(안정성 옵션)
         body = _fetch_article_text(link)
-        # 제목과 본문을 합쳐 모델에 입력(본문 없으면 제목만)
         text_for_model = (title + " " + body).strip() if body else title
-
         all_news.append({"날짜": pub_date, "Title": title, "RawUrl": link, "ModelInput": text_for_model})
 
     if not all_news:
@@ -282,31 +333,33 @@ def get_news_with_multi_model_analysis(_bq_client, models, keyword, days_limit=7
 
     df_new = pd.DataFrame(all_news).drop_duplicates(subset=["Title"])
     with st.spinner(f"다중 모델로 '{keyword}' 뉴스 감성 분석 중..."):
-        multi = analyze_sentiment_multi(df_new['ModelInput'].tolist(), models)
+        multi = analyze_sentiment_multi(df_new['ModelInput'].tolist(), models_dict)
 
     multi_df = pd.DataFrame(multi)
     df_new = pd.concat([df_new.drop(columns=['ModelInput']), multi_df], axis=1)
     df_new['Keyword'] = keyword
     df_new['InsertedAt'] = datetime.now(timezone.utc)
 
-    # (캐시 저장 - 스키마 확장 반영)
+    # BigQuery 캐시 저장 시도 (실패해도 UI는 계속)
     try:
         df_to_gbq = df_new[[
             "날짜", "Title", "Keyword", "Sentiment", "Label", "InsertedAt",
             "FinBERT_Sentiment", "FinBERT_Label",
-            "KLUE_Sentiment", "KLUE_Label",
-            "NSMC_Sentiment", "NSMC_Label",
+            "Elite_Sentiment", "Elite_Label",
+            "Product_Sentiment", "Product_Label",
             "RawUrl"
         ]]
-        pandas_gbq.to_gbq(df_to_gbq, full_table_id, project_id=project_id,
+        pandas_gbq.to_gbq(df_to_gbq, f"{project_id}.{BQ_DATASET}.{BQ_TABLE_NEWS}", project_id=project_id,
                           if_exists="append", credentials=_bq_client._credentials)
     except Exception as e:
         st.sidebar.warning(f"BigQuery 저장 실패(계속 진행): {e}")
-        df_to_gbq = df_new  # 화면 표시는 계속
+        df_to_gbq = df_new
 
     return df_to_gbq
 
-# --- 4. Data Fetching (BigQuery, KAMIS, NAVER) ---
+# ----------------------------
+#  BigQuery 데이터 목록 가져오기 (기본)
+# ----------------------------
 @st.cache_data(ttl=3600)
 def get_categories_from_bq(_client):
     project_id = _client.project
@@ -340,7 +393,6 @@ def get_trade_data_from_bq(client, categories):
 
 @st.cache_data(ttl=3600)
 def fetch_naver_trends_data(_client, keywords, start_date, end_date, naver_keys):
-    # Google Trends 제거, Naver DataLab 집중 (검색어 + 쇼핑)
     project_id = _client.project
     table_id = f"{project_id}.{BQ_DATASET}.{BQ_TABLE_NAVER}"
     try:
@@ -373,7 +425,6 @@ def fetch_naver_trends_data(_client, keywords, start_date, end_date, naver_keys)
             all_data_chunk = []
             for keyword in keywords:
                 keyword_dfs = []
-
                 # 검색어 인덱스
                 body_search = json.dumps({
                     "startDate": current_start.strftime('%Y-%m-%d'),
@@ -437,54 +488,94 @@ def fetch_naver_trends_data(_client, keywords, start_date, end_date, naver_keys)
         return pd.DataFrame()
     return df_final[(df_final['날짜'] >= start_date) & (df_final['날짜'] <= end_date)].reset_index(drop=True)
 
-def fetch_kamis_data(_client, item_info, start_date, end_date, kamis_keys):
-    start_str, end_str = start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')
-    url = (f"http://www.kamis.or.kr/service/price/xml.do?action=periodWholesaleProductList"
-           f"&p_product_cls_code=01&p_startday={start_str}&p_endday={end_str}"
-           f"&p_item_category_code={item_info['cat_code']}&p_item_code={item_info['item_code']}&p_kind_code={item_info['kind_code']}"
-           f"&p_product_rank_code={item_info['rank_code']}&p_convert_kg_yn=Y"
-           f"&p_cert_key={kamis_keys['key']}&p_cert_id={kamis_keys['id']}&p_returntype=json")
-    try:
-        response = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0 KAMISClient/1.0"})
-        if response.status_code == 200 and "data" in response.json() and "item" in response.json()["data"]:
-            price_data = response.json()["data"]["item"]
-            if not price_data:
-                return pd.DataFrame()
-            df_new = pd.DataFrame(price_data)[['regday', 'price']].rename(columns={'regday': '날짜', 'price': '도매가격_원'})
-            def format_kamis_date(date_str):
-                processed_str = date_str.replace('/', '-')
-                if processed_str.count('-') == 1:
-                    return f"{start_date.year}-{processed_str}"
-                return processed_str
-            df_new['날짜'] = pd.to_datetime(df_new['날짜'].apply(format_kamis_date))
-            df_new['도매가격_원'] = pd.to_numeric(df_new['도매가격_원'].str.replace(',', ''), errors='coerce')
-            return df_new
-    except Exception as e:
-        st.sidebar.error(f"KAMIS API 호출 중 오류: {e}")
-    return pd.DataFrame()
-
-# --- 5. Streamlit App UI and Main Logic ---
-st.set_page_config(layout="wide")
-st.title("📊 데이터 탐색 및 통합 분석 대시보드 (다중 AI 감성 & Naver 중심)")
-
-bq_client = get_bq_connection()
-models = load_models()
-if bq_client is None:
-    st.error("GCP 초기화에 실패했습니다. 앱을 재시작해주세요.")
-    st.stop()
-ensure_news_table_exists(bq_client)
-
-# 세션 상태 초기화
+# ----------------------------
+#  Session state 초기화 (필요한 키들)
+# ----------------------------
 if 'data_loaded' not in st.session_state:
     st.session_state.data_loaded = False
 if 'selected_categories' not in st.session_state:
     st.session_state.selected_categories = []
+if 'raw_trade_df' not in st.session_state:
+    st.session_state.raw_trade_df = pd.DataFrame()
+if 'wholesale_data' not in st.session_state:
+    st.session_state.wholesale_data = pd.DataFrame()
 if 'search_data' not in st.session_state:
     st.session_state.search_data = pd.DataFrame()
 if 'news_data' not in st.session_state:
     st.session_state.news_data = pd.DataFrame()
+if 'weekly_dfs' not in st.session_state:
+    st.session_state.weekly_dfs = {}
+if 'final_df' not in st.session_state:
+    st.session_state.final_df = pd.DataFrame()
 
-# --- Sidebar UI ---
+# BQ client
+bq_client = get_bq_connection()
+if bq_client is None:
+    st.error("GCP 초기화에 실패했습니다. 앱을 재시작해주세요.")
+    st.stop()
+
+# Ensure news table exists (best-effort)
+def _safe_update_news_table_schema(client):
+    try:
+        project_id = client.project
+        table_id = f"{project_id}.{BQ_DATASET}.{BQ_TABLE_NEWS}"
+        table = client.get_table(table_id)
+        existing = {s.name for s in table.schema}
+        add_fields = []
+        wanted = [
+            ("FinBERT_Sentiment", "FLOAT"),
+            ("FinBERT_Label", "STRING"),
+            ("Elite_Sentiment", "FLOAT"),
+            ("Elite_Label", "STRING"),
+            ("Product_Sentiment", "FLOAT"),
+            ("Product_Label", "STRING"),
+            ("RawUrl", "STRING"),
+        ]
+        for name, t in wanted:
+            if name not in existing:
+                add_fields.append(bigquery.SchemaField(name, t))
+        if add_fields:
+            new_schema = list(table.schema) + add_fields
+            table.schema = new_schema
+            client.update_table(table, ["schema"])
+    except Exception:
+        pass
+
+def ensure_news_table_exists(client):
+    project_id = client.project
+    full_table_id = f"{project_id}.{BQ_DATASET}.{BQ_TABLE_NEWS}"
+    try:
+        client.get_table(full_table_id)
+        _safe_update_news_table_schema(client)
+    except Exception:
+        st.write(f"뉴스 분석 테이블 '{full_table_id}'을 새로 생성합니다.")
+        schema = [
+            bigquery.SchemaField("날짜", "DATE"),
+            bigquery.SchemaField("Title", "STRING"),
+            bigquery.SchemaField("Keyword", "STRING"),
+            bigquery.SchemaField("Sentiment", "FLOAT"),
+            bigquery.SchemaField("Label", "STRING"),
+            bigquery.SchemaField("InsertedAt", "TIMESTAMP"),
+            bigquery.SchemaField("FinBERT_Sentiment", "FLOAT"),
+            bigquery.SchemaField("FinBERT_Label", "STRING"),
+            bigquery.SchemaField("Elite_Sentiment", "FLOAT"),
+            bigquery.SchemaField("Elite_Label", "STRING"),
+            bigquery.SchemaField("Product_Sentiment", "FLOAT"),
+            bigquery.SchemaField("Product_Label", "STRING"),
+            bigquery.SchemaField("RawUrl", "STRING"),
+        ]
+        table = bigquery.Table(full_table_id, schema=schema)
+        try:
+            client.create_table(table)
+            st.success(f"테이블 '{BQ_TABLE_NEWS}' 생성 완료.")
+        except Exception as e:
+            st.warning(f"테이블 생성 실패 (무시 가능): {e}")
+
+ensure_news_table_exists(bq_client)
+
+# ----------------------------
+#  Sidebar: 데이터 소스 선택 & API 키
+# ----------------------------
 st.sidebar.header("⚙️ 분석 설정")
 st.sidebar.subheader("1. 데이터 소스 선택")
 data_src = st.sidebar.radio("데이터 소스", ["BigQuery", "CSV 업로드"])
@@ -518,7 +609,7 @@ else:
                     st.session_state.raw_trade_df = df
                     st.session_state.data_loaded = True
                     st.session_state.selected_categories = selected_categories
-                    st.rerun()
+                    st.experimental_rerun()
                 else:
                     st.sidebar.error("데이터를 불러오지 못했습니다.")
 
@@ -581,36 +672,42 @@ if st.sidebar.button("📰 뉴스 감성 분석 실행"):
     else:
         st.sidebar.warning("뉴스 분석 키워드를 입력해주세요.")
 
-# --- Main Display Tabs ---
+# ----------------------------
+#  메인: 빠른 작업 (모든 외부 데이터셋 해제 포함)
+# ----------------------------
+st.markdown("### ⚡ 빠른 작업")
+colA, colB, colC, colD = st.columns(4)
+
+with colA:
+    if st.button("🧹 네이버 데이터 해제(초기화)"):
+        st.session_state.search_data = pd.DataFrame()
+        st.success("네이버 데이터셋을 해제했습니다.")
+
+with colB:
+    if st.button("🧹 KAMIS 데이터 해제"):
+        st.session_state.wholesale_data = pd.DataFrame()
+        st.success("KAMIS(도매가격) 데이터를 해제했습니다.")
+
+with colC:
+    if st.button("🧹 뉴스 데이터 해제"):
+        st.session_state.news_data = pd.DataFrame()
+        st.success("뉴스 데이터셋을 해제했습니다.")
+
+with colD:
+    if st.button("🧹 모든 외부 데이터 초기화 (네이버/KAMIS/뉴스)"):
+        st.session_state.search_data = pd.DataFrame()
+        st.session_state.wholesale_data = pd.DataFrame()
+        st.session_state.news_data = pd.DataFrame()
+        st.success("모든 외부 데이터셋을 초기화했습니다.")
+
+# 데이터 (세션)
 raw_wholesale_df = st.session_state.get('wholesale_data', pd.DataFrame())
 raw_search_df = st.session_state.get('search_data', pd.DataFrame())
 raw_news_df = st.session_state.get('news_data', pd.DataFrame())
 
-# (NEW) 메인 화면 '해제/재로딩' 빠른 액션바
-st.markdown("### ⚡ 빠른 작업")
-colA, colB, colC = st.columns(3)
-with colA:
-    if st.button("🧹 네이버 데이터 해제(초기화)"):
-        st.session_state.search_data = pd.DataFrame()
-        st.success("네이버 데이터셋을 해제했습니다. (메인화면 표시도 즉시 초기화)")
-with colB:
-    if st.button("🔁 네이버 데이터 다시 불러오기"):
-        if search_keywords and naver_client_id and naver_client_secret:
-            st.session_state.search_data = fetch_naver_trends_data(
-                bq_client, search_keywords, start_date, end_date,
-                {'id': naver_client_id, 'secret': naver_client_secret}
-            )
-            st.success("네이버 데이터셋을 현재 키워드로 재로딩했습니다.")
-        else:
-            st.warning("키워드 및 Naver API 키를 확인하세요.")
-with colC:
-    if st.button("📰 뉴스 분석 다시 실행"):
-        if search_keywords:
-            st.session_state.news_data = get_news_with_multi_model_analysis(bq_client, models, search_keywords[0])
-            st.success("뉴스 감성 분석을 다시 실행했습니다.")
-        else:
-            st.warning("뉴스 분석 키워드를 입력하세요.")
-
+# ----------------------------
+#  Tabs: 원본, 표준화, 뉴스(다중모델), 상관, 예측
+# ----------------------------
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "1️⃣ 원본 데이터",
     "2️⃣ 데이터 표준화",
@@ -665,13 +762,12 @@ with tab2:
 
 with tab3:
     st.header("뉴스 감성 분석 결과 (세 모델 교차 비교)")
+
     raw_news_df = st.session_state.get('news_data', pd.DataFrame())
 
-    # (NEW) AI 뉴스 트렌드 요약 카드
     def _simple_tokenize_ko(text):
-        # 형태소기 없어도 동작하는 가벼운 토크나이저 (영숫자/한글 단어)
         import re
-        toks = re.findall(r"[가-힣A-Za-z0-9]+", text)
+        toks = re.findall(r"[가-힣A-Za-z0-9]+", str(text))
         stop = set(["한국", "정부", "시장", "경제", "가격", "관련", "등", "및", "뉴스", "기사", "최근", "전망"])
         return [t for t in toks if len(t) > 1 and t not in stop]
 
@@ -679,18 +775,16 @@ with tab3:
         dfn = raw_news_df.copy()
         dfn['날짜'] = pd.to_datetime(dfn['날짜'])
 
-        # (NEW) 세 모델 평균/개별 시계열
-        for col in ["FinBERT_Sentiment", "KLUE_Sentiment", "NSMC_Sentiment"]:
+        for col in ["FinBERT_Sentiment", "Elite_Sentiment", "Product_Sentiment"]:
             if col not in dfn.columns:
                 dfn[col] = np.nan
-        dfn["AvgSentiment_3Models"] = dfn[["FinBERT_Sentiment", "KLUE_Sentiment", "NSMC_Sentiment"]].mean(axis=1, skipna=True)
 
-        # 요약 기간 (최근 N일)
+        dfn["AvgSentiment_3Models"] = dfn[["FinBERT_Sentiment", "Elite_Sentiment", "Product_Sentiment"]].mean(axis=1, skipna=True)
+
         N_days = 14
         cutoff = dfn['날짜'].max() - pd.Timedelta(days=N_days-1)
         df_recent = dfn[dfn['날짜'] >= cutoff]
 
-        # 긍/부정 키워드(제목 기반 라이트 추출)
         pos_mask = dfn['AvgSentiment_3Models'] > 0.15
         neg_mask = dfn['AvgSentiment_3Models'] < -0.15
         pos_words = pd.Series(sum([_simple_tokenize_ko(t) for t in dfn.loc[pos_mask, 'Title'].dropna().tolist()], [])).value_counts().head(5)
@@ -708,38 +802,34 @@ with tab3:
                 f"긍정 키워드: {pos_kw if pos_kw else '없음'} / 부정 키워드: {neg_kw if neg_kw else '없음'}"
             )
 
-        # 주별 집계 (세 모델)
         news_weekly = dfn.dropna(subset=['날짜']).set_index('날짜').resample('W-Mon').mean(numeric_only=True)
         news_weekly.index.name = '날짜'
 
-        # 시계열: 3모델 비교
+        # plot: FinBERT / Elite / Product / Avg
         fig_multi = px.line(
             news_weekly.reset_index(),
             x='날짜',
-            y=['FinBERT_Sentiment', 'KLUE_Sentiment', 'NSMC_Sentiment', 'AvgSentiment_3Models'],
-            title="주별 평균 뉴스 감성 점수 (FinBERT / KLUE / NSMC / 평균)"
+            y=['FinBERT_Sentiment', 'Elite_Sentiment', 'Product_Sentiment', 'AvgSentiment_3Models'],
+            title="주별 평균 뉴스 감성 점수 (FinBERT / Elite / Product / 평균)"
         )
         fig_multi.add_hline(y=0, line_dash="dash")
         st.plotly_chart(fig_multi, use_container_width=True)
 
-        # 키워드별 라인 (FinBERT 기준, 다중키워드면 색상 분리)
         if 'Keyword' in dfn.columns and dfn['Keyword'].nunique() > 1:
             fig_kw = px.line(dfn.sort_values('날짜'), x='날짜', y='FinBERT_Sentiment', color='Keyword', title="키워드별 FinBERT 감성 추이")
             st.plotly_chart(fig_kw, use_container_width=True)
 
         st.markdown("---")
         st.subheader("수집 뉴스 원본 및 감성 점수 (최신순)")
-        show_cols = ['날짜', 'Title', 'Keyword', 'FinBERT_Sentiment', 'KLUE_Sentiment', 'NSMC_Sentiment',
-                     'FinBERT_Label', 'KLUE_Label', 'NSMC_Label', 'RawUrl']
+        show_cols = ['날짜', 'Title', 'Keyword', 'FinBERT_Sentiment', 'Elite_Sentiment', 'Product_Sentiment',
+                     'FinBERT_Label', 'Elite_Label', 'Product_Label', 'RawUrl']
         st.dataframe(dfn.sort_values(by='날짜', ascending=False)[[c for c in show_cols if c in dfn.columns]])
-
     else:
         st.info("사이드바 또는 상단 빠른 작업에서 뉴스 감성 분석을 실행해주세요.")
 
-# (tab4 - 상관관계)
 with tab4:
     st.header("상관관계 분석")
-    if 'weekly_dfs' in st.session_state:
+    if 'weekly_dfs' in st.session_state and st.session_state['weekly_dfs']:
         weekly_dfs = st.session_state['weekly_dfs']
         dfs_to_concat = [df for df in weekly_dfs.values() if not df.empty]
         if len(dfs_to_concat) > 1:
