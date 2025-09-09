@@ -153,16 +153,20 @@ def load_models():
         st.warning(f"KLUE/BERT 로드 실패(범용): {e}")
         models["klue"] = None
 
-    # 3) 상품평(NSMC)
+# 3) 뉴스 댓글 감성 분석 (Huffon Model)
     try:
-        with st.spinner("모델 로드: NSMC(상품평) ..."):
-            name = "heew/bert-nsmc-base-v1"
+        with st.spinner("모델 로드: 뉴스 감성 분석 (Huffon)..."):
+            
+            # 모델 ID를 'heew/...'에서 'Huffon/...'으로 변경
+            name = "Huffon/klue-bert-base-sentiment-news-comments"
             tok = AutoTokenizer.from_pretrained(name)
             mdl = AutoModelForSequenceClassification.from_pretrained(name)
-            models["nsmc"] = pipeline("sentiment-analysis", model=mdl, tokenizer=tok)
+            # 딕셔너리 키도 'nsmc'에서 'news_comments'로 변경
+            models["news_comments"] = pipeline("sentiment-analysis", model=mdl, tokenizer=tok)
+
     except Exception as e:
-        st.warning(f"NSMC 로드 실패: {e}")
-        models["nsmc"] = None
+        st.warning(f"뉴스 댓글 모델 로드 실패: {e}")
+        models["news_comments"] = None # 키 이름 통일
 
     return models
 
