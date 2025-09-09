@@ -17,5 +17,4 @@ statsmodels
 prophet
 feedparser
 captum
-konlpy
 huggingface_hub
