@@ -153,20 +153,19 @@ def load_models():
         st.warning(f"KLUE/BERT 로드 실패(범용): {e}")
         models["klue"] = None
 
-# 3) 뉴스 댓글 감성 분석 (Huffon Model)
+# 3) 범용 감성 분석 (KoELECTRA 기반 - NSMC)
     try:
-        with st.spinner("모델 로드: 뉴스 감성 분석 (Huffon)..."):
+        # KLUE(BERT) 모델과 교차 검증(앙상블)하기 위한 ELECTRA 아키텍처 모델
+        model_id = "jaehyeong/koelectra-base-v3-nsmc"
+        
+        with st.spinner(f"모델 로드: 범용 감성(KoELECTRA) ({model_id})..."):
             
-            # 모델 ID를 'heew/...'에서 'Huffon/...'으로 변경
-            name = "Huffon/klue-bert-base-sentiment-news-comments"
-            tok = AutoTokenizer.from_pretrained(name)
-            mdl = AutoModelForSequenceClassification.from_pretrained(name)
-            # 딕셔너리 키도 'nsmc'에서 'news_comments'로 변경
-            models["news_comments"] = pipeline("sentiment-analysis", model=mdl, tokenizer=tok)
+            # 딕셔너리 키를 'koelectra_nsmc' 등으로 설정
+            models["koelectra_nsmc"] = pipeline("sentiment-analysis", model=model_id)
 
     except Exception as e:
-        st.warning(f"뉴스 댓글 모델 로드 실패: {e}")
-        models["news_comments"] = None # 키 이름 통일
+        st.warning(f"KoELECTRA 모델 로드 실패: {e}")
+        models["koelectra_nsmc"] = None
 
     return models
 
