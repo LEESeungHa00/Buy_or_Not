@@ -609,7 +609,7 @@ else:
                     st.session_state.raw_trade_df = df
                     st.session_state.data_loaded = True
                     st.session_state.selected_categories = selected_categories
-                    st.experimental_rerun()
+                    st.rerun()
                 else:
                     st.sidebar.error("데이터를 불러오지 못했습니다.")
 
