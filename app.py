@@ -127,7 +127,7 @@ else:
 DEFAULT_MODEL_IDS = {
     "finbert": "snunlp/KR-FinBERT-SC",                      # 금융 특화 (분류 모델)
     "elite": "nlptown/bert-base-multilingual-uncased-sentiment",  # 범용 다국어 감성(1~5 star)
-    "product": "heegyu/bert-nsmc"                            # 상품평(NSMC) 계열 (예: nsmc 학습 모델, 실패시 fallback)
+    "product": "daekeun-ml/koelectra-small-v3-nsmc"               # 상품평(NSMC) 계열 (예: nsmc 학습 모델, 실패시 fallback)
 }
 
 # Sidebar: 모델 아이디 재정의 (사용자가 직접 입력 가능)
