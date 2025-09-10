@@ -839,13 +839,6 @@ with tab4:
                 fig_heatmap = px.imshow(corr_matrix, text_auto=True, aspect="auto", color_continuous_scale='RdBu_r', range_color=[-1, 1])
                 st.plotly_chart(fig_heatmap, use_container_width=True)
 
-                st.subheader("산점도 행렬 (Scatter Matrix)")
-                # scaled_final_df를 사용하여 산점도 행렬 생성
-                fig_matrix = px.scatter_matrix(scaled_final_df.reset_index(),
-                                               dimensions=scaled_final_df.columns,
-                                               title="통합 데이터 산점도 행렬 (Min-Max Scaling)")
-                st.plotly_chart(fig_matrix, use_container_width=True)
-
                 # --- 교차 상관관계 분석 (Cross-Correlation) ---
                 st.subheader("교차 상관관계 분석 (최적 시차)")
                 
@@ -909,6 +902,15 @@ with tab4:
                         st.info("교차 상관관계를 계산할 수 있는 데이터가 부족합니다.")
 
 
+
+                st.subheader("산점도 행렬 (Scatter Matrix)")
+                # scaled_final_df를 사용하여 산점도 행렬 생성
+                fig_matrix = px.scatter_matrix(scaled_final_df.reset_index(),
+                                               dimensions=scaled_final_df.columns,
+                                               title="통합 데이터 산점도 행렬 (Min-Max Scaling)")
+                st.plotly_chart(fig_matrix, use_container_width=True)
+
+                
         
         else:
             st.warning("상관관계 분석을 위해 둘 이상의 데이터가 필요합니다.")
