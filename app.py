@@ -40,18 +40,18 @@ BQ_TABLE_NAVER = "naver_trends_cache"
 BQ_TABLE_NEWS = "news_sentiment_finbert"
 BQ_TABLE_TRADE = "tds_data"
 
-'''
-KAMIS_FULL_DATA = {
-    '쌀': {'cat_code': '100', 'item_code': '111', 'kinds': {'20kg': '01', '백미': '02'}},
-    '감자': {'cat_code': '100', 'item_code': '152', 'kinds': {'수미(노지)': '01', '수미(시설)': '04'}},
-    '배추': {'cat_code': '200', 'item_code': '211', 'kinds': {'봄': '01', '여름': '02', '가을': '03'}},
-    '양파': {'cat_code': '200', 'item_code': '245', 'kinds': {'양파': '00', '햇양파': '02'}},
-    '사과': {'cat_code': '400', 'item_code': '411', 'kinds': {'후지': '05', '아오리': '06'}},
-    '바나나': {'cat_code': '400', 'item_code': '418', 'kinds': {'수입': '02'}},
-    '아보카도': {'cat_code': '400', 'item_code': '430', 'kinds': {'수입': '00'}},
-    '고등어': {'cat_code': '600', 'item_code': '611', 'kinds': {'생선': '01', '냉동': '02'}},
-}
-'''
+
+# KAMIS_FULL_DATA = {
+#     '쌀': {'cat_code': '100', 'item_code': '111', 'kinds': {'20kg': '01', '백미': '02'}},
+#     '감자': {'cat_code': '100', 'item_code': '152', 'kinds': {'수미(노지)': '01', '수미(시설)': '04'}},
+#     '배추': {'cat_code': '200', 'item_code': '211', 'kinds': {'봄': '01', '여름': '02', '가을': '03'}},
+#     '양파': {'cat_code': '200', 'item_code': '245', 'kinds': {'양파': '00', '햇양파': '02'}},
+#     '사과': {'cat_code': '400', 'item_code': '411', 'kinds': {'후지': '05', '아오리': '06'}},
+#     '바나나': {'cat_code': '400', 'item_code': '418', 'kinds': {'수입': '02'}},
+#     '아보카도': {'cat_code': '400', 'item_code': '430', 'kinds': {'수입': '00'}},
+#     '고등어': {'cat_code': '600', 'item_code': '611', 'kinds': {'생선': '01', '냉동': '02'}},
+# }
+
 # ----------------------------
 #  Helpers: BigQuery + Naver + KAMIS
 # ----------------------------
