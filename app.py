@@ -610,7 +610,7 @@ if st.sidebar.button("파일을 BigQuery에 업로드"):
 # ----------------------------
 guide_content = """
 ### 🚀 대시보드 사용법 가이드
-이 대시보드는 데이터 전문가가 아니더라도 누구나 쉽게 데이터 속 숨은 의미를 찾고 미래를 예측할 수 있도록 설계되었습니다. 각 기능의 의미와 활용법을 이해하면 더 강력한 인사이트를 얻을 수 있습니다.
+* **`이 대시보드는 데이터 전문가가 아니더라도 누구나 쉽게 데이터 속 숨은 의미를 찾고 미래를 예측할 수 있도록 설계되었습니다. 각 기능의 의미와 활용법을 이해하면 더 강력한 인사이트를 얻을 수 있습니다.
 ---
 ### 1. 📊 상관관계 분석 탭 활용법
 이 탭은 **"어떤 데이터들이 서로 관련이 있을까?"** 라는 질문에 답을 줍니다.
@@ -696,15 +696,32 @@ if not st.session_state.final_df.empty:
                 future_regressors = future_regressors.reindex(future['ds']).fillna(method='ffill').fillna(last_values)
                 future = pd.concat([future.set_index('ds'), future_regressors], axis=1).reset_index()
                 forecast = m.predict(future)
-                ml_df = forecast[['ds', 'trend', 'yearly', 'weekly']].set_index('ds').join(prophet_df.set_index('ds')).dropna()
-                X, y = ml_df.drop(columns=['y']), ml_df['y']
+
+                # Dynamically build the list of components that exist in the forecast output
+                prophet_components = ['trend']
+                if 'yearly' in forecast.columns: prophet_components.append('yearly')
+                if 'weekly' in forecast.columns: prophet_components.append('weekly')
+                if 'daily' in forecast.columns: prophet_components.append('daily')
+
+                ml_df = forecast[['ds'] + prophet_components].set_index('ds').join(prophet_df.set_index('ds')).dropna()
+                
+                # Define features for XGBoost: Prophet components + external regressors
+                xgb_features = prophet_components + selected_regressors
+                
+                # Ensure all selected features exist in the final ML dataframe
+                existing_xgb_features = [f for f in xgb_features if f in ml_df.columns]
+                
+                X, y = ml_df[existing_xgb_features], ml_df['y']
+                
                 train_size = int(len(X) * 0.85)
                 X_train, X_test, y_train, y_test = X.iloc[:train_size], X.iloc[train_size:], y.iloc[:train_size], y.iloc[train_size:]
+                
                 xgb_model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=1000, learning_rate=0.01, early_stopping_rounds=50)
                 xgb_model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
                 y_pred_xgb = xgb_model.predict(X_test)
                 r2, rmse = r2_score(y_test, y_pred_xgb), np.sqrt(mean_squared_error(y_test, y_pred_xgb))
                 feature_imp = pd.DataFrame(sorted(zip(xgb_model.feature_importances_, X.columns)), columns=['Value','Feature'])
+
             st.subheader("Prophet 예측 결과")
             st.plotly_chart(plot_plotly(m, forecast), use_container_width=True)
             with st.expander("🔍 Prophet 예측 해석"): st.markdown("- **검은 점:** 실제 데이터\n- **파란선:** 예측값\n- **파란 영역:** 불확실성 구간")
