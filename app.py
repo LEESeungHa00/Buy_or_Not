@@ -64,6 +64,7 @@ def get_bq_connection():
         st.error(f"Google BigQuery 연결 실패: secrets.toml을 확인하세요. 오류: {e}")
         return None
 
+
 def call_naver_api(url, body, naver_keys):
     try:
         request = urllib.request.Request(url)
@@ -77,6 +78,7 @@ def call_naver_api(url, body, naver_keys):
     except Exception as e:
         st.error(f"Naver API 오류 발생: {e}")
         return None
+
 
 def fetch_kamis_data(_client, item_info, start_date, end_date, kamis_keys):
     start_str, end_str = start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')
@@ -93,12 +95,13 @@ def fetch_kamis_data(_client, item_info, start_date, end_date, kamis_keys):
                 return pd.DataFrame()
             df_new = pd.DataFrame(price_data)[['regday', 'price']].rename(columns={'regday': '날짜', 'price': '도매가격_원'})
             def format_kamis_date(date_str):
-                processed_str = date_str.replace('/', '-')
+                processed_str = str(date_str).replace('/', '-')
                 if processed_str.count('-') == 1:
+                    # no year provided in some responses; assume start_date year
                     return f"{start_date.year}-{processed_str}"
                 return processed_str
-            df_new['날짜'] = pd.to_datetime(df_new['날짜'].apply(format_kamis_date))
-            df_new['도매가격_원'] = pd.to_numeric(df_new['도매가격_원'].str.replace(',', ''), errors='coerce')
+            df_new['날짜'] = pd.to_datetime(df_new['날짜'].apply(format_kamis_date), errors='coerce')
+            df_new['도매가격_원'] = pd.to_numeric(df_new['도매가격_원'].astype(str).str.replace(',', ''), errors='coerce')
             return df_new
     except Exception as e:
         st.sidebar.error(f"KAMIS API 호출 중 오류: {e}")
@@ -138,7 +141,6 @@ USER_MODEL_IDS = {"finbert": finbert_id.strip() or DEFAULT_MODEL_IDS["finbert"],
 
 @st.cache_resource
 def load_models(user_model_ids, token):
-    """안전하게 세 모델을 로드. 실패해도 앱이 멈추지 않도록 방어 처리."""
     models = {}
     load_report = {}
     for key, mid in user_model_ids.items():
@@ -146,7 +148,7 @@ def load_models(user_model_ids, token):
         load_report[key] = {"model_id": mid, "loaded": False, "error": None}
 
         try:
-            # 1) 시도: AutoTokenizer + AutoModelForSequenceClassification (정상적으로 classification head 있을 때)
+            # 1) 시도: AutoTokenizer + AutoModelForSequenceClassification
             if token:
                 tok = AutoTokenizer.from_pretrained(mid, use_auth_token=token)
                 mdl = AutoModelForSequenceClassification.from_pretrained(mid, use_auth_token=token)
@@ -205,6 +207,7 @@ def _label_score_to_signed(pred):
         return 0.0, "neutral"
     return (score if score <= 1 else 0.0), ("positive" if score >= 0.5 else "neutral")
 
+
 def analyze_sentiment_multi(texts, models_dict):
     results = []
     if not texts:
@@ -229,6 +232,7 @@ def analyze_sentiment_multi(texts, models_dict):
         fin_s, fin_l = _label_score_to_signed(preds["finbert"][i] if preds.get("finbert") else None)
         el_s, el_l = _label_score_to_signed(preds["elite"][i] if preds.get("elite") else None)
         pr_s, pr_l = _label_score_to_signed(preds["product"][i] if preds.get("product") else None)
+        # 종합 기준은 FinBERT 우선
         results.append({
             "FinBERT_Sentiment": fin_s, "FinBERT_Label": fin_l,
             "Elite_Sentiment": el_s, "Elite_Label": el_l,
@@ -240,6 +244,7 @@ def analyze_sentiment_multi(texts, models_dict):
 # ----------------------------
 #  뉴스 수집/분석 (강화된 안정성)
 # ----------------------------
+
 def _fetch_article_text(url):
     if not _HAS_NEWSPAPER or not url:
         return ""
@@ -253,6 +258,7 @@ def _fetch_article_text(url):
         return art.text or ""
     except Exception:
         return ""
+
 
 def get_news_with_multi_model_analysis(_bq_client, models_dict, keyword, days_limit=7):
     project_id = _bq_client.project
@@ -281,7 +287,7 @@ def get_news_with_multi_model_analysis(_bq_client, models_dict, keyword, days_li
     rss_url = f"https://news.google.com/rss/search?q={quote(keyword)}&hl=ko&gl=KR&ceid=KR:ko"
     feed = feedparser.parse(rss_url)
 
-    for entry in feed.entries[:30]:
+    for entry in feed.entries[:60]:
         title = entry.get('title', '').strip()
         link = entry.get('link', '').strip()
         if not title:
@@ -338,6 +344,7 @@ def get_categories_from_bq(_client):
     except Exception:
         return []
 
+
 def get_trade_data_from_bq(client, categories):
     if not categories:
         return pd.DataFrame()
@@ -392,6 +399,7 @@ def fetch_naver_trends_data(_client, keywords, start_date, end_date, naver_keys)
             all_data_chunk = []
             for keyword in keywords:
                 keyword_dfs = []
+                # SEARCH
                 body_search = json.dumps({
                     "startDate": current_start.strftime('%Y-%m-%d'),
                     "endDate": current_end.strftime('%Y-%m-%d'),
@@ -404,7 +412,8 @@ def fetch_naver_trends_data(_client, keywords, start_date, end_date, naver_keys)
                     if not df_search.empty:
                         keyword_dfs.append(df_search.rename(columns={'period': '날짜', 'ratio': f'NaverSearch_{keyword}'}))
 
-                norm_keyword = keyword.lower().replace(' ', '')
+                # SHOPPING (use keyword as-is for map)
+                norm_keyword = keyword
                 if norm_keyword in NAVER_SHOPPING_CAT_MAP:
                     cat_id = NAVER_SHOPPING_CAT_MAP[norm_keyword]
                     body_shop = json.dumps({
@@ -438,11 +447,18 @@ def fetch_naver_trends_data(_client, keywords, start_date, end_date, naver_keys)
         if non_empty:
             df_new = pd.concat(non_empty, ignore_index=True)
             df_new['날짜'] = pd.to_datetime(df_new['날짜'])
-            df_combined = pd.concat([df_cache, df_new], ignore_index=True)\
-                .drop_duplicates(subset=['날짜'], keep='last')\
-                .sort_values(by='날짜').reset_index(drop=True)
-            pandas_gbq.to_gbq(df_combined, table_id, project_id=project_id,
-                              if_exists="replace", credentials=_client._credentials)
+            # merge with cache safely
+            if not df_cache.empty:
+                df_combined = pd.concat([df_cache, df_new], ignore_index=True)
+                df_combined = df_combined.sort_values('날짜').drop_duplicates(subset=['날짜'], keep='last').reset_index(drop=True)
+            else:
+                df_combined = df_new.sort_values('날짜').reset_index(drop=True)
+
+            try:
+                pandas_gbq.to_gbq(df_combined, table_id, project_id=project_id, if_exists="replace", credentials=_client._credentials)
+            except Exception:
+                # if replace fails, skip saving
+                pass
             df_final = df_combined
         else:
             df_final = df_cache
@@ -511,6 +527,7 @@ def _safe_update_news_table_schema(client):
             client.update_table(table, ["schema"])
     except Exception:
         pass
+
 
 def ensure_news_table_exists(client):
     project_id = client.project
@@ -723,24 +740,18 @@ with tab2:
         # 네이버 트렌드 데이터 (검색/쇼핑)
         if not raw_search_df.empty and '날짜' in raw_search_df.columns:
             raw_search_df['날짜'] = pd.to_datetime(raw_search_df['날짜'])
-            search_weekly = raw_search_df.set_index('날짜').resample('W-Mon').mean(numeric_only=True).fillna(0) # .fillna(0) 추가
+            search_weekly = raw_search_df.set_index('날짜').resample('W-Mon').mean(numeric_only=True).fillna(0)
             search_weekly.index.name = '날짜'
             weekly_dfs['search'] = search_weekly
 
         # 뉴스 감성 분석 데이터 (다중 모델)
         if not raw_news_df.empty and '날짜' in raw_news_df.columns:
             raw_news_df['날짜'] = pd.to_datetime(raw_news_df['날짜'])
-            
-            # 모든 감성 분석 컬럼을 포함하도록 변경
             sentiment_cols = [col for col in raw_news_df.columns if 'Sentiment' in col]
-            
             if sentiment_cols:
-                # 감성 분석 컬럼만 선택하여 주별 평균 계산
                 news_weekly = raw_news_df.set_index('날짜')[sentiment_cols].resample('W-Mon').mean(numeric_only=True)
-                
-                # 컬럼 이름 통일: 'FinBERT_Sentiment' -> 'NewsSentiment_FinBERT'
-                news_weekly.rename(columns={'FinBERT_Sentiment': 'NewsSentiment_FinBERT'}, inplace=True)
-                
+                # 안전한 컬럼 rename
+                news_weekly = news_weekly.rename(columns=lambda x: 'News_' + x if not x.startswith('News_') else x)
                 news_weekly.index.name = '날짜'
                 weekly_dfs['news'] = news_weekly
 
@@ -825,37 +836,42 @@ with tab4:
     if 'weekly_dfs' in st.session_state and st.session_state['weekly_dfs']:
         weekly_dfs = st.session_state['weekly_dfs']
         dfs_to_concat = [df for df in weekly_dfs.values() if not df.empty]
-        if len(dfs_to_concat) > 0: # 1개가 아니라 0개보다 많은 경우로 변경
-            # 데이터프레임들을 병합합니다. 결측치는 그대로 둡니다.
-            final_df = reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), dfs_to_concat)
-            final_df.index = pd.to_datetime(final_df.index)
-            # 결측치를 선형 보간으로 채웁니다.
+        if len(dfs_to_concat) > 0:
+            # merge on index '날짜' -> ensure index names
+            for k, df in weekly_dfs.items():
+                if df.index.name != '날짜':
+                    df.index.name = '날짜'
+
+            final_df = reduce(lambda left, right: pd.merge(left.reset_index(), right.reset_index(), on='날짜', how='outer'), dfs_to_concat)
+            final_df['날짜'] = pd.to_datetime(final_df['날짜'])
+            final_df = final_df.set_index('날짜').sort_index()
+
+            # interpolate missing values
             final_df = final_df.interpolate(method='linear', limit_direction='both')
-          
-            # 모든 컬럼이 유의미한 데이터가 있는지 확인
-            # 단일 컬럼만 남거나 모든 데이터가 NaN인 경우를 방지
-            final_df_valid = final_df.dropna(how='all', axis=1) # 모든 값이 NaN인 컬럼 제거
-            
+
+            final_df_valid = final_df.dropna(how='all', axis=1)
+
             if final_df_valid.empty:
                 st.warning("데이터 병합에 실패했습니다. 날짜 범위가 겹치지 않거나, 모든 데이터가 결측치일 수 있습니다. 날짜 설정을 확인해주세요.")
                 st.session_state['final_df'] = pd.DataFrame()
                 st.session_state['scaled_final_df'] = pd.DataFrame()
             else:
-                st.session_state['final_df'] = final_df_valid # 원본 데이터는 유지
-                
-                # '날짜' 컬럼을 제외한 모든 컬럼에 대해 스케일링
+                st.session_state['final_df'] = final_df_valid
+
                 numeric_cols = final_df_valid.select_dtypes(include=np.number).columns
                 scaled_final_df = final_df_valid.copy()
                 for col in numeric_cols:
                     min_val = scaled_final_df[col].min()
                     max_val = scaled_final_df[col].max()
+                    if pd.isna(min_val) or pd.isna(max_val):
+                        scaled_final_df[col] = scaled_final_df[col].fillna(0.0)
+                        continue
                     if max_val - min_val > 0:
                         scaled_final_df[col] = (scaled_final_df[col] - min_val) / (max_val - min_val)
                     else:
                         scaled_final_df[col] = 0.0
-                st.session_state['scaled_final_df'] = scaled_final_df # 스케일링된 데이터 저장
-            
-            # 아래 시각화 코드는 변경된 session_state를 사용하여 실행됩니다.
+                st.session_state['scaled_final_df'] = scaled_final_df
+
             if 'scaled_final_df' in st.session_state and not st.session_state['scaled_final_df'].empty:
                 scaled_final_df = st.session_state['scaled_final_df']
 
@@ -871,158 +887,152 @@ with tab4:
                     st.plotly_chart(fig_heatmap, use_container_width=True)
 
                     st.subheader("교차 상관관계 분석 (최적 시차)")
-                    
-                    driver_vars = [col for col in scaled_final_df.columns if 'Sentiment' in col or 'Naver' in col]
-                    outcome_vars = [col for col in scaled_final_df.columns if '수입' in col or '도매가격' in col]
+
+                    driver_vars = [col for col in scaled_final_df.columns if 'Sentiment' in col or 'Naver' in col or 'News_' in col or 'search' in col.lower()]
+                    outcome_vars = [col for col in scaled_final_df.columns if '수입' in col or '도매가격' in col or 'price' in col.lower()]
 
                     if not driver_vars or not outcome_vars:
                         st.info("교차 상관관계 분석을 위한 변수가 부족합니다. 감성/검색량(드라이버)과 수입/가격(결과) 데이터를 모두 불러왔는지 확인해주세요.")
                     else:
                         best_correlations = []
-                        max_lag = 5 
-                        
-                        # Find the single best lag for each unique driver-outcome pair
+                        max_lag = 5
                         for driver in driver_vars:
                             for outcome in outcome_vars:
                                 if driver == outcome:
                                     continue
-                                
-                                max_corr_val = -1
+                                max_corr_val = None
                                 best_lag = 0
-                                
                                 for lag in range(-max_lag, max_lag + 1):
                                     if lag == 0:
                                         continue
-                                    
-                                    if lag > 0:
-                                        corr = scaled_final_df[driver].corr(scaled_final_df[outcome].shift(lag))
-                                    else:
-                                        corr = scaled_final_df[driver].shift(abs(lag)).corr(scaled_final_df[outcome])
-                                    
-                                    if pd.notna(corr) and abs(corr) > abs(max_corr_val):
-                                        max_corr_val = corr
-                                        best_lag = lag
-                                
-                                if max_corr_val != -1: # if a correlation was found
+                                    try:
+                                        if lag > 0:
+                                            corr = scaled_final_df[driver].corr(scaled_final_df[outcome].shift(lag))
+                                        else:
+                                            corr = scaled_final_df[driver].shift(abs(lag)).corr(scaled_final_df[outcome])
+                                    except Exception:
+                                        corr = np.nan
+                                    if pd.notna(corr):
+                                        if max_corr_val is None or abs(corr) > abs(max_corr_val):
+                                            max_corr_val = corr
+                                            best_lag = lag
+                                if max_corr_val is not None:
                                     best_correlations.append({
                                         'driver': driver,
                                         'outcome': outcome,
                                         'lag': best_lag,
                                         'correlation': max_corr_val
                                     })
-                        
+
                         if best_correlations:
                             best_corr_df = pd.DataFrame(best_correlations)
-                            top_3_corrs = best_corr_df.sort_values(by='correlation', ascending=False, key=lambda x: x.abs()).head(3)
-                            
+                            top_3_corrs = best_corr_df.iloc[best_corr_df['correlation'].abs().sort_values(ascending=False).index].head(3)
+
                             st.markdown("##### 📈 **가장 높은 교차 상관관계 상위 3**")
-                            
+
                             for _, row in top_3_corrs.iterrows():
                                 driver = row['driver']
                                 outcome = row['outcome']
                                 lag = row['lag']
                                 corr = row['correlation']
-                                
                                 direction = "긍정적" if corr > 0 else "부정적"
-                                
                                 sentence = f"**{driver}**의 변화는 **{abs(lag)}주 후** **{outcome}**와 **{direction}** 관계를 가집니다 (상관계수: {corr:.2f})."
                                 st.markdown(f"• {sentence}")
                         else:
                             st.info("교차 상관관계를 계산할 수 있는 데이터가 부족합니다.")
 
-                
                 st.subheader("산점도 행렬 (Scatter Matrix)")
-                fig_matrix = px.scatter_matrix(scaled_final_df.reset_index(),
-                                               dimensions=scaled_final_df.columns,
-                                               title="통합 데이터 산점도 행렬 (Min-Max Scaling)")
-                st.plotly_chart(fig_matrix, use_container_width=True)
+                try:
+                    fig_matrix = px.scatter_matrix(scaled_final_df.reset_index(),
+                                                   dimensions=scaled_final_df.columns,
+                                                   title="통합 데이터 산점도 행렬 (Min-Max Scaling)")
+                    st.plotly_chart(fig_matrix, use_container_width=True)
+                except Exception as e:
+                    st.warning(f"산점도 행렬 생성 실패: {e}")
 
             else:
                 st.warning("상관관계 분석을 위해 둘 이상의 데이터가 필요합니다.")
+        else:
+            st.warning("데이터프레임이 충분하지 않습니다. 외부 데이터(네이버/뉴스/KAMIS)를 불러와주세요.")
     else:
         st.warning("2단계에서 데이터가 처리되지 않았습니다.")
 
 with tab5:
     st.header("시계열 분해 및 예측 (by Prophet)")
     if 'final_df' in st.session_state and not st.session_state['final_df'].empty:
-        final_df = st.session_state['final_df']
-        forecast_col = st.selectbox("예측 대상 변수 선택", final_df.columns)
-        
-        # 외부 변수(regressors) 선택
-        regressors_cols = [col for col in final_df.columns if col != forecast_col]
+        final_df = st.session_state['final_df'].reset_index()
+        forecast_col = st.selectbox("예측 대상 변수 선택", [c for c in final_df.columns if c != '날짜'])
+
+        regressors_cols = [col for col in final_df.columns if col != '날짜' and col != forecast_col]
         selected_regressors = st.multiselect("예측에 사용할 외부 변수 선택", regressors_cols, default=[])
 
-        # (NEW) Initialize session state variables for figures
         if 'fig_decompose' not in st.session_state:
             st.session_state.fig_decompose = None
         if 'fig_forecast' not in st.session_state:
             st.session_state.fig_forecast = None
-            
+
         if st.button("📈 선택한 변수로 예측 실행하기"):
-            # 예측에 사용할 데이터 준비
-            # 필요한 모든 컬럼이 final_df에 있는지 확인
             required_cols = ['날짜', forecast_col] + selected_regressors
             if not all(col in final_df.columns for col in required_cols):
                 st.error("선택한 예측 변수 또는 외부 변수가 데이터에 존재하지 않습니다. 모든 외부 데이터(네이버/뉴스)를 먼저 불러왔는지 확인해주세요.")
                 st.stop()
-            
-            ts_data_raw = final_df[required_cols] # .dropna() 제거
 
-            # Prophet 모델을 위한 데이터프레임 복사 및 전처리
-            prophet_df = ts_data_raw.copy().set_index('날짜')
+            ts_data_raw = final_df[required_cols].copy()
+
+            prophet_df = ts_data_raw.rename(columns={'날짜': 'ds', forecast_col: 'y'})
+            prophet_df['ds'] = pd.to_datetime(prophet_df['ds'])
             prophet_df = prophet_df.interpolate(method='linear', limit_direction='both')
-            prophet_df.reset_index(inplace=True)
-            prophet_df.dropna(inplace=True)
+            prophet_df = prophet_df.dropna()
 
             if len(prophet_df) < 24:
                 st.warning(f"최소 24주 이상의 데이터가 필요합니다. 현재: {len(prophet_df)}주")
             else:
                 with st.spinner(f"'{forecast_col}' 예측 모델 학습 중..."):
-                    # 시계열 분해 시각화 (원본 데이터 사용)
-                    st.subheader(f"'{forecast_col}' 시계열 분해")
                     period = 52 if len(prophet_df) >= 104 else max(4, int(len(prophet_df) / 2))
-                    decomposition = seasonal_decompose(prophet_df.set_index('날짜')[forecast_col], model='additive', period=period)
-                    fig_decompose = go.Figure()
-                    fig_decompose.add_trace(go.Scatter(x=decomposition.observed.index, y=decomposition.observed, name='Observed'))
-                    fig_decompose.add_trace(go.Scatter(x=decomposition.trend.index, y=decomposition.trend, name='Trend'))
-                    fig_decompose.add_trace(go.Scatter(x=decomposition.seasonal.index, y=decomposition.seasonal, name='Seasonal'))
-                    st.session_state.fig_decompose = fig_decompose
+                    try:
+                        decomposition = seasonal_decompose(prophet_df.set_index('ds')['y'], model='additive', period=period)
+                        fig_decompose = go.Figure()
+                        fig_decompose.add_trace(go.Scatter(x=decomposition.observed.index, y=decomposition.observed, name='Observed'))
+                        fig_decompose.add_trace(go.Scatter(x=decomposition.trend.index, y=decomposition.trend, name='Trend'))
+                        fig_decompose.add_trace(go.Scatter(x=decomposition.seasonal.index, y=decomposition.seasonal, name='Seasonal'))
+                        st.session_state.fig_decompose = fig_decompose
+                    except Exception as e:
+                        st.warning(f"시계열 분해 실패: {e}")
 
-                    st.subheader(f"'{forecast_col}' 미래 12주 예측")
-                    
-                    # Min-Max Scaling for regressors only
                     for reg in selected_regressors:
                         min_val = prophet_df[reg].min()
                         max_val = prophet_df[reg].max()
-                        if max_val - min_val > 0:
-                            prophet_df[reg] = (prophet_df[reg] - min_val) / (max_val - min_val)
-                        else:
+                        if pd.isna(min_val) or pd.isna(max_val) or max_val - min_val == 0:
                             prophet_df[reg] = 0.0
-
-                    prophet_df = prophet_df.rename(columns={'날짜': 'ds', forecast_col: 'y'})
+                        else:
+                            prophet_df[reg] = (prophet_df[reg] - min_val) / (max_val - min_val)
 
                     m = Prophet()
                     for reg in selected_regressors:
                         m.add_regressor(reg)
-                    
-                    m.fit(prophet_df)
-                    
+
+                    try:
+                        m.fit(prophet_df)
+                    except Exception as e:
+                        st.error(f"Prophet 학습 실패: {e}")
+                        st.stop()
+
                     future = m.make_future_dataframe(periods=12, freq='W')
-                    
-                    # Fill future regressors
                     for reg in selected_regressors:
-                        future_reg_data = prophet_df.tail(1).iloc[0][reg] # Get last value from scaled data
-                        future[reg] = future_reg_data
+                        future[reg] = prophet_df.tail(1).iloc[0][reg]
 
                     forecast = m.predict(future)
-                    
+
                     fig_forecast = plot_plotly(m, forecast)
                     st.session_state.fig_forecast = fig_forecast
                     st.session_state['forecast_data'] = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(12)
 
                     st.subheader("예측 요인별 기여도")
-                    fig_components = plot_components_plotly(m, forecast)
-                    st.plotly_chart(fig_components, use_container_width=True)
+                    try:
+                        fig_components = plot_components_plotly(m, forecast)
+                        st.plotly_chart(fig_components, use_container_width=True)
+                    except Exception:
+                        st.info("구성 요소 플롯을 생성할 수 없습니다.")
 
         if st.session_state.fig_decompose is not None:
             st.plotly_chart(st.session_state.fig_decompose, use_container_width=True)
@@ -1031,3 +1041,5 @@ with tab5:
             st.dataframe(st.session_state['forecast_data'])
     else:
         st.info("4번 탭에서 데이터가 통합되어야 예측을 수행할 수 있습니다.")
+
+                                        
