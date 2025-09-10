@@ -882,8 +882,14 @@ with tab5:
             
         if st.button("📈 선택한 변수로 예측 실행하기"):
             # 예측에 사용할 데이터 준비
-            ts_data_raw = final_df[['날짜', forecast_col] + selected_regressors].dropna()
+            # 필요한 모든 컬럼이 final_df에 있는지 확인
+            required_cols = ['날짜', forecast_col] + selected_regressors
+            if not all(col in final_df.columns for col in required_cols):
+                st.error("선택한 예측 변수 또는 외부 변수가 데이터에 존재하지 않습니다. 모든 외부 데이터(네이버/뉴스)를 먼저 불러왔는지 확인해주세요.")
+                st.stop()
             
+            ts_data_raw = final_df[required_cols].dropna()
+
             if len(ts_data_raw) < 24:
                 st.warning(f"최소 24주 이상의 데이터가 필요합니다. 현재: {len(ts_data_raw)}주")
             else:
