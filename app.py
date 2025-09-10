@@ -711,28 +711,46 @@ with tab2:
         trade_weekly['수입단가_USD_KG'] = trade_weekly['수입액_USD'] / trade_weekly['수입량_KG']
         trade_weekly.index.name = '날짜'
 
-        dfs_to_process = {'wholesale': raw_wholesale_df, 'search': raw_search_df, 'news': raw_news_df}
         weekly_dfs = {'trade': trade_weekly}
 
-        for name, df in dfs_to_process.items():
-            if not df.empty and '날짜' in df.columns:
-                df['날짜'] = pd.to_datetime(df['날짜'])
-                df_in_range = df[(df['날짜'] >= start_date) & (df['날짜'] <= end_date)]
-                if not df_in_range.empty:
-                    # news 데이터는 평균 감성 점수만, search는 모든 컬럼
-                    if name == 'news':
-                        df_weekly = df_in_range.set_index('날짜').resample('W-Mon').mean(numeric_only=True)
-                        df_weekly.rename(columns={'FinBERT_Sentiment': 'NewsSentiment_FinBERT'}, inplace=True)
-                    else:
-                        df_weekly = df_in_range.set_index('날짜').resample('W-Mon').mean(numeric_only=True)
-                    df_weekly.index.name = '날짜'
-                    weekly_dfs[name] = df_weekly
+        # 외부 가격 데이터 (KAMIS)
+        if not raw_wholesale_df.empty and '날짜' in raw_wholesale_df.columns:
+            raw_wholesale_df['날짜'] = pd.to_datetime(raw_wholesale_df['날짜'])
+            wholesale_weekly = raw_wholesale_df.set_index('날짜').resample('W-Mon').mean(numeric_only=True)
+            wholesale_weekly.index.name = '날짜'
+            weekly_dfs['wholesale'] = wholesale_weekly
+
+        # 네이버 트렌드 데이터 (검색/쇼핑)
+        if not raw_search_df.empty and '날짜' in raw_search_df.columns:
+            raw_search_df['날짜'] = pd.to_datetime(raw_search_df['날짜'])
+            search_weekly = raw_search_df.set_index('날짜').resample('W-Mon').mean(numeric_only=True).fillna(0) # .fillna(0) 추가
+            search_weekly.index.name = '날짜'
+            weekly_dfs['search'] = search_weekly
+
+        # 뉴스 감성 분석 데이터 (다중 모델)
+        if not raw_news_df.empty and '날짜' in raw_news_df.columns:
+            raw_news_df['날짜'] = pd.to_datetime(raw_news_df['날짜'])
+            
+            # 모든 감성 분석 컬럼을 포함하도록 변경
+            sentiment_cols = [col for col in raw_news_df.columns if 'Sentiment' in col]
+            
+            if sentiment_cols:
+                # 감성 분석 컬럼만 선택하여 주별 평균 계산
+                news_weekly = raw_news_df.set_index('날짜')[sentiment_cols].resample('W-Mon').mean(numeric_only=True)
+                
+                # 컬럼 이름 통일: 'FinBERT_Sentiment' -> 'NewsSentiment_FinBERT'
+                news_weekly.rename(columns={'FinBERT_Sentiment': 'NewsSentiment_FinBERT'}, inplace=True)
+                
+                news_weekly.index.name = '날짜'
+                weekly_dfs['news'] = news_weekly
 
         st.session_state['weekly_dfs'] = weekly_dfs
         st.write("### 주별 집계 데이터 샘플")
         for name, df in weekly_dfs.items():
             st.write(f"##### {name.capitalize()} Data (Weekly)")
             st.dataframe(df.head())
+            st.write(f"**컬럼:** {df.columns.tolist()}")
+
     else:
         st.warning("선택된 기간에 해당하는 수출입 데이터가 없습니다.")
 
