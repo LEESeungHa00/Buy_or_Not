@@ -874,6 +874,12 @@ with tab5:
         regressors_cols = [col for col in final_df.columns if col != forecast_col]
         selected_regressors = st.multiselect("예측에 사용할 외부 변수 선택", regressors_cols, default=[])
 
+        # (NEW) Initialize session state variables for figures
+        if 'fig_decompose' not in st.session_state:
+            st.session_state.fig_decompose = None
+        if 'fig_forecast' not in st.session_state:
+            st.session_state.fig_forecast = None
+            
         if st.button("📈 선택한 변수로 예측 실행하기"):
             # 예측에 사용할 데이터 준비
             ts_data_raw = final_df[['날짜', forecast_col] + selected_regressors].dropna()
@@ -890,7 +896,7 @@ with tab5:
                     fig_decompose.add_trace(go.Scatter(x=decomposition.observed.index, y=decomposition.observed, name='Observed'))
                     fig_decompose.add_trace(go.Scatter(x=decomposition.trend.index, y=decomposition.trend, name='Trend'))
                     fig_decompose.add_trace(go.Scatter(x=decomposition.seasonal.index, y=decomposition.seasonal, name='Seasonal'))
-                    st.session_state['fig_decompose'] = fig_decompose
+                    st.session_state.fig_decompose = fig_decompose  # Correctly assign the plotly figure object
 
                     st.subheader(f"'{forecast_col}' 미래 12주 예측")
                     
@@ -924,25 +930,32 @@ with tab5:
                     # 여기서는 가장 최근의 값을 사용하여 미래를 채우는 단순한 방법을 사용
                     # 실제 프로젝트에서는 외부 변수의 미래값도 예측해야 함
                     for reg in selected_regressors:
-                        future[reg] = prophet_df[reg].iloc[-1]
-                    
+                        future_reg_df = final_df[[reg]].tail(12)
+                        min_val = final_df[reg].min()
+                        max_val = final_df[reg].max()
+                        if max_val - min_val > 0:
+                            future_reg_df[reg] = (future_reg_df[reg] - min_val) / (max_val - min_val)
+                        else:
+                            future_reg_df[reg] = 0.0
+                        future = pd.merge(future, future_reg_df.reset_index(), how='left', left_on='ds', right_on='날짜').drop(columns=['날짜'])
+                        future[reg] = future[reg].interpolate(method='linear', limit_direction='both')
+
                     # 예측 수행
                     forecast = m.predict(future)
 
                     # 예측 결과 시각화
                     fig_forecast = plot_plotly(m, forecast)
-                    st.plotly_chart(fig_forecast, use_container_width=True)
-                    st.session_state['fig_forecast'] = fig_forecast
+                    st.session_state.fig_forecast = fig_forecast
                     st.session_state['forecast_data'] = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(12)
 
                     st.subheader("예측 요인별 기여도")
                     fig_components = plot_components_plotly(m, forecast)
                     st.plotly_chart(fig_components, use_container_width=True)
 
-        if 'fig_decompose' in st.session_state:
-            st.plotly_chart(st.session_state['fig_decompose'], use_container_width=True)
-        if 'fig_forecast' in st.session_state:
-            st.plotly_chart(st.session_state['fig_forecast'], use_container_width=True)
+        if st.session_state.fig_decompose is not None:
+            st.plotly_chart(st.session_state.fig_decompose, use_container_width=True)
+        if st.session_state.fig_forecast is not None:
+            st.plotly_chart(st.session_state.fig_forecast, use_container_width=True)
             st.dataframe(st.session_state['forecast_data'])
     else:
         st.info("4번 탭에서 데이터가 통합되어야 예측을 수행할 수 있습니다.")
