@@ -880,11 +880,11 @@ with tab4:
                     if correlations:
                         corr_df = pd.DataFrame(correlations)
                         corr_df['abs_correlation'] = corr_df['correlation'].abs()
-                        top_3_corrs = corr_df.sort_values(by='abs_correlation', ascending=False).head(3)
+                        top_10_corrs = corr_df.sort_values(by='abs_correlation', ascending=False).head(10)
                         
-                        st.markdown("##### 📈 **가장 높은 교차 상관관계 상위 3**")
+                        st.markdown("##### 📈 **가장 높은 교차 상관관계 상위 10**")
                         
-                        for _, row in top_3_corrs.iterrows():
+                        for _, row in top_10_corrs.iterrows():
                             var1 = row['var1']
                             var2 = row['var2']
                             lag = row['lag']
