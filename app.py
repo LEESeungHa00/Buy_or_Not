@@ -831,8 +831,7 @@ with tab4:
             final_df.index = pd.to_datetime(final_df.index)
             # 결측치를 선형 보간으로 채웁니다.
             final_df = final_df.interpolate(method='linear', limit_direction='both')
-            
-            # --- 수정된 코드 시작 ---
+          
             # 모든 컬럼이 유의미한 데이터가 있는지 확인
             # 단일 컬럼만 남거나 모든 데이터가 NaN인 경우를 방지
             final_df_valid = final_df.dropna(how='all', axis=1) # 모든 값이 NaN인 컬럼 제거
@@ -855,7 +854,6 @@ with tab4:
                     else:
                         scaled_final_df[col] = 0.0
                 st.session_state['scaled_final_df'] = scaled_final_df # 스케일링된 데이터 저장
-            # --- 수정된 코드 끝 ---
             
             # 아래 시각화 코드는 변경된 session_state를 사용하여 실행됩니다.
             if 'scaled_final_df' in st.session_state and not st.session_state['scaled_final_df'].empty:
@@ -883,6 +881,7 @@ with tab4:
                         best_correlations = []
                         max_lag = 5 
                         
+                        # Find the single best lag for each unique driver-outcome pair
                         for driver in driver_vars:
                             for outcome in outcome_vars:
                                 if driver == outcome:
@@ -900,16 +899,16 @@ with tab4:
                                     else:
                                         corr = scaled_final_df[driver].shift(abs(lag)).corr(scaled_final_df[outcome])
                                     
-                                    if pd.notna(corr) and abs(corr) > max_corr_val:
-                                        max_corr_val = abs(corr)
+                                    if pd.notna(corr) and abs(corr) > abs(max_corr_val):
+                                        max_corr_val = corr
                                         best_lag = lag
                                 
-                                if max_corr_val > 0:
+                                if max_corr_val != -1: # if a correlation was found
                                     best_correlations.append({
                                         'driver': driver,
                                         'outcome': outcome,
                                         'lag': best_lag,
-                                        'correlation': max_corr_val if scaled_final_df[driver].corr(scaled_final_df[outcome].shift(best_lag)) > 0 else -max_corr_val
+                                        'correlation': max_corr_val
                                     })
                         
                         if best_correlations:
@@ -931,6 +930,7 @@ with tab4:
                         else:
                             st.info("교차 상관관계를 계산할 수 있는 데이터가 부족합니다.")
 
+                
                 st.subheader("산점도 행렬 (Scatter Matrix)")
                 fig_matrix = px.scatter_matrix(scaled_final_df.reset_index(),
                                                dimensions=scaled_final_df.columns,
@@ -966,29 +966,31 @@ with tab5:
                 st.error("선택한 예측 변수 또는 외부 변수가 데이터에 존재하지 않습니다. 모든 외부 데이터(네이버/뉴스)를 먼저 불러왔는지 확인해주세요.")
                 st.stop()
             
-            ts_data_raw = final_df[required_cols].dropna()
+            ts_data_raw = final_df[required_cols] # .dropna() 제거
 
-            if len(ts_data_raw) < 24:
-                st.warning(f"최소 24주 이상의 데이터가 필요합니다. 현재: {len(ts_data_raw)}주")
+            # Prophet 모델을 위한 데이터프레임 복사 및 전처리
+            prophet_df = ts_data_raw.copy().set_index('날짜')
+            prophet_df = prophet_df.interpolate(method='linear', limit_direction='both')
+            prophet_df.reset_index(inplace=True)
+            prophet_df.dropna(inplace=True)
+
+            if len(prophet_df) < 24:
+                st.warning(f"최소 24주 이상의 데이터가 필요합니다. 현재: {len(prophet_df)}주")
             else:
                 with st.spinner(f"'{forecast_col}' 예측 모델 학습 중..."):
                     # 시계열 분해 시각화 (원본 데이터 사용)
                     st.subheader(f"'{forecast_col}' 시계열 분해")
-                    period = 52 if len(ts_data_raw) >= 104 else max(4, int(len(ts_data_raw) / 2))
-                    decomposition = seasonal_decompose(ts_data_raw.set_index('날짜')[forecast_col], model='additive', period=period)
+                    period = 52 if len(prophet_df) >= 104 else max(4, int(len(prophet_df) / 2))
+                    decomposition = seasonal_decompose(prophet_df.set_index('날짜')[forecast_col], model='additive', period=period)
                     fig_decompose = go.Figure()
                     fig_decompose.add_trace(go.Scatter(x=decomposition.observed.index, y=decomposition.observed, name='Observed'))
                     fig_decompose.add_trace(go.Scatter(x=decomposition.trend.index, y=decomposition.trend, name='Trend'))
                     fig_decompose.add_trace(go.Scatter(x=decomposition.seasonal.index, y=decomposition.seasonal, name='Seasonal'))
-                    st.session_state.fig_decompose = fig_decompose  # Correctly assign the plotly figure object
+                    st.session_state.fig_decompose = fig_decompose
 
                     st.subheader(f"'{forecast_col}' 미래 12주 예측")
                     
-                    # Prophet 모델 학습을 위한 데이터프레임 복사
-                    prophet_df = ts_data_raw.copy()
-                    
-                    # Min-Max Scaling 적용 (예측 대상 변수 제외)
-                    # Prophet은 y 변수의 원본 스케일을 유지해야 의미 있는 예측이 가능
+                    # Min-Max Scaling for regressors only
                     for reg in selected_regressors:
                         min_val = prophet_df[reg].min()
                         max_val = prophet_df[reg].max()
@@ -997,37 +999,23 @@ with tab5:
                         else:
                             prophet_df[reg] = 0.0
 
-                    # 컬럼명 변경
                     prophet_df = prophet_df.rename(columns={'날짜': 'ds', forecast_col: 'y'})
 
-                    # Prophet 모델 생성 및 학습
                     m = Prophet()
                     for reg in selected_regressors:
                         m.add_regressor(reg)
                     
                     m.fit(prophet_df)
                     
-                    # 미래 예측을 위한 데이터프레임 생성
                     future = m.make_future_dataframe(periods=12, freq='W')
                     
-                    # 미래 기간에 대한 외부 변수 데이터 준비
-                    # 여기서는 가장 최근의 값을 사용하여 미래를 채우는 단순한 방법을 사용
-                    # 실제 프로젝트에서는 외부 변수의 미래값도 예측해야 함
+                    # Fill future regressors
                     for reg in selected_regressors:
-                        future_reg_df = final_df[[reg]].tail(12)
-                        min_val = final_df[reg].min()
-                        max_val = final_df[reg].max()
-                        if max_val - min_val > 0:
-                            future_reg_df[reg] = (future_reg_df[reg] - min_val) / (max_val - min_val)
-                        else:
-                            future_reg_df[reg] = 0.0
-                        future = pd.merge(future, future_reg_df.reset_index(), how='left', left_on='ds', right_on='날짜').drop(columns=['날짜'])
-                        future[reg] = future[reg].interpolate(method='linear', limit_direction='both')
+                        future_reg_data = prophet_df.tail(1).iloc[0][reg] # Get last value from scaled data
+                        future[reg] = future_reg_data
 
-                    # 예측 수행
                     forecast = m.predict(future)
-
-                    # 예측 결과 시각화
+                    
                     fig_forecast = plot_plotly(m, forecast)
                     st.session_state.fig_forecast = fig_forecast
                     st.session_state['forecast_data'] = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(12)
