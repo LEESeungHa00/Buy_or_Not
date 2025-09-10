@@ -16,6 +16,7 @@ from urllib.parse import quote
 from statsmodels.tsa.seasonal import seasonal_decompose
 from prophet import Prophet
 from prophet.plot import plot_plotly, plot_components_plotly
+from kamis_data import KAMIS_FULL_DATA
 
 # Transformers / HuggingFace
 from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
@@ -39,7 +40,7 @@ BQ_TABLE_NAVER = "naver_trends_cache"
 BQ_TABLE_NEWS = "news_sentiment_finbert"
 BQ_TABLE_TRADE = "tds_data"
 
-KAMIS_FULL_DATA = {
+#KAMIS_FULL_DATA = {
     '쌀': {'cat_code': '100', 'item_code': '111', 'kinds': {'20kg': '01', '백미': '02'}},
     '감자': {'cat_code': '100', 'item_code': '152', 'kinds': {'수미(노지)': '01', '수미(시설)': '04'}},
     '배추': {'cat_code': '200', 'item_code': '211', 'kinds': {'봄': '01', '여름': '02', '가을': '03'}},
