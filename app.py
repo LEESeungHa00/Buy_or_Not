@@ -839,64 +839,66 @@ with tab4:
                 fig_heatmap = px.imshow(corr_matrix, text_auto=True, aspect="auto", color_continuous_scale='RdBu_r', range_color=[-1, 1])
                 st.plotly_chart(fig_heatmap, use_container_width=True)
 
-                # --- 교차 상관관계 분석 (Cross-Correlation) ---
+                # --- Targeted Cross-Correlation Analysis ---
                 st.subheader("교차 상관관계 분석 (최적 시차)")
                 
-                # 분석할 변수 목록 정의
-                variables = scaled_final_df.columns.tolist()
-                if len(variables) < 2:
-                    st.info("교차 상관관계 분석을 위해 두 개 이상의 변수가 필요합니다.")
+                # 분석을 통제할 수 있도록 각 데이터를 구분
+                #'driver' 와 'outcome' 변수로 구분해 지정
+                driver_vars = [col for col in scaled_final_df.columns if 'Sentiment' in col or 'Naver' in col]
+                outcome_vars = [col for col in scaled_final_df.columns if '수입' in col or '도매가격' in col]
+    
+                # 조건에 맞는 변수가 지정되지 않으면 설명하는 문구를 출력
+                if not driver_vars or not outcome_vars:
+                    st.info("교차 상관관계 분석을 위한 변수가 부족합니다. 감성/검색량(드라이버)과 수입/가격(결과) 데이터를 모두 불러왔는지 확인해주세요.")
                 else:
                     correlations = []
-                    # 최대 시차 (lag) 범위 설정
+                    # lag range의 최대 범위를 확인(e.g., +/- 5 weeks)
                     max_lag = 5 
                     
-                    # 모든 변수 쌍에 대해 교차 상관관계 계산
-                    for i in range(len(variables)):
-                        for j in range(i + 1, len(variables)):
-                            var1 = variables[i]
-                            var2 = variables[j]
-                            
+                    # drivers와 outcomes 간의 상관관계만 계산 (중량과 중량, 감성지수와 감성지수 와 같이 같은 계열의 값이 상관도가 높은 것으로 묶이는 것 방지)
+                    for driver in driver_vars:
+                        for outcome in outcome_vars:
+                            # Skip if the driver and outcome are the same column (just in case)
+                            if driver == outcome:
+                                continue
+                                
                             for lag in range(-max_lag, max_lag + 1):
                                 if lag == 0:
-                                    continue # 0 시차는 일반 상관관계이므로 건너뜀
+                                    continue # 중복 건너뛰기기
                                 
-                                # 시차 적용된 데이터의 상관관계 계산
                                 if lag > 0:
-                                    corr = scaled_final_df[var1].corr(scaled_final_df[var2].shift(lag))
+                                    # Correlation between driver at time t and outcome at time t+lag
+                                    corr = scaled_final_df[driver].corr(scaled_final_df[outcome].shift(lag))
                                 else:
-                                    corr = scaled_final_df[var1].shift(-lag).corr(scaled_final_df[var2])
+                                    # Correlation between driver at time t+lag and outcome at time t
+                                    # This handles negative lags correctly
+                                    corr = scaled_final_df[driver].shift(abs(lag)).corr(scaled_final_df[outcome])
                                 
-                                # 상관계수와 시차 값 저장
                                 if pd.notna(corr):
                                     correlations.append({
-                                        'var1': var1,
-                                        'var2': var2,
+                                        'driver': driver,
+                                        'outcome': outcome,
                                         'lag': lag,
                                         'correlation': corr
                                     })
                     
-                    # 상관관계가 가장 높은 상위 3개 찾기
+                    # 상위 3개의 상관관계 찾기
                     if correlations:
                         corr_df = pd.DataFrame(correlations)
                         corr_df['abs_correlation'] = corr_df['correlation'].abs()
-                        top_10_corrs = corr_df.sort_values(by='abs_correlation', ascending=False).head(10)
+                        top_3_corrs = corr_df.sort_values(by='abs_correlation', ascending=False).head(3)
                         
-                        st.markdown("##### 📈 **가장 높은 교차 상관관계 상위 10**")
+                        st.markdown("##### 📈 **가장 높은 교차 상관관계 상위 3**")
                         
-                        for _, row in top_10_corrs.iterrows():
-                            var1 = row['var1']
-                            var2 = row['var2']
+                        for _, row in top_3_corrs.iterrows():
+                            driver = row['driver']
+                            outcome = row['outcome']
                             lag = row['lag']
                             corr = row['correlation']
                             
                             direction = "긍정적" if corr > 0 else "부정적"
                             
-                            if lag > 0:
-                                sentence = f"**{var1}**의 변화는 **{abs(lag)}주 후** **{var2}**와 **{direction}** 관계를 가집니다 (상관계수: {corr:.2f})."
-                            else:
-                                sentence = f"**{var2}**의 변화는 **{abs(lag)}주 후** **{var1}**와 **{direction}** 관계를 가집니다 (상관계수: {corr:.2f})."
-                            
+                            sentence = f"**{driver}**의 변화는 **{abs(lag)}주 후** **{outcome}**와 **{direction}** 관계를 가집니다 (상관계수: {corr:.2f})."
                             st.markdown(f"• {sentence}")
                     else:
                         st.info("교차 상관관계를 계산할 수 있는 데이터가 부족합니다.")
