@@ -814,11 +814,11 @@ with tab4:
             st.write("---")
             st.write("### 🔍 데이터 진단")
             st.info("아래 테이블을 확인하여 모든 데이터가 올바르게 병합되었는지 확인하세요.")
-            st.write("#### 병합 대상 데이터프레임 목록:")
-            for name, df in weekly_dfs.items():
-                st.write(f"- **{name.capitalize()}** DataFrame:")
-                st.dataframe(df.head())
-                st.write(f"  컬럼: {df.columns.tolist()}")
+            #st.write("#### 병합 대상 데이터프레임 목록:")
+            #for name, df in weekly_dfs.items():
+                #st.write(f"- **{name.capitalize()}** DataFrame:")
+                #st.dataframe(df.head())
+                #st.write(f"  컬럼: {df.columns.tolist()}")
             
             st.write("#### 최종 병합될 데이터프레임 (final_df) 미리보기:")
             final_df_preview = reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), dfs_to_concat)
