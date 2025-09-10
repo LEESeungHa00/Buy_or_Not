@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -16,7 +15,7 @@ import feedparser
 from urllib.parse import quote
 from statsmodels.tsa.seasonal import seasonal_decompose
 from prophet import Prophet
-from prophet.plot import plot_plotly
+from prophet.plot import plot_plotly, plot_components_plotly
 
 # Transformers / HuggingFace
 from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
@@ -38,6 +37,7 @@ st.title("📊 데이터 탐색 및 통합 분석 대시보드 (다중 AI 감성
 BQ_DATASET = "data_explorer"
 BQ_TABLE_NAVER = "naver_trends_cache"
 BQ_TABLE_NEWS = "news_sentiment_finbert"
+BQ_TABLE_TRADE = "tds_data"
 
 KAMIS_FULL_DATA = {
     '쌀': {'cat_code': '100', 'item_code': '111', 'kinds': {'20kg': '01', '백미': '02'}},
@@ -107,7 +107,6 @@ def fetch_kamis_data(_client, item_info, start_date, end_date, kamis_keys):
 # ----------------------------
 #  HuggingFace: 로그인 + 안전한 모델 로드
 # ----------------------------
-# 토큰 읽기 (Streamlit Secrets에 huggingface.token 으로 저장했다고 가정)
 hf_token = None
 try:
     hf_token = st.secrets["huggingface"]["token"]
@@ -116,21 +115,19 @@ except Exception:
 
 if hf_token:
     try:
-        hf_login(token=hf_token)  # 로그인 시도 (읽기 전용 토큰이면 OK)
+        hf_login(token=hf_token)
         st.sidebar.success("HuggingFace token 적용됨.")
     except Exception as e:
         st.sidebar.warning(f"HuggingFace 로그인 실패: {e}")
 else:
     st.sidebar.info("HuggingFace token이 secrets에 없습니다. private 모델 사용 시 필요합니다.")
 
-# 기본 추천 모델 (사용자가 사이드바에서 덮어쓸 수 있음)
 DEFAULT_MODEL_IDS = {
-    "finbert": "snunlp/KR-FinBERT-SC",                      # 금융 특화 (분류 모델)
-    "elite": "nlptown/bert-base-multilingual-uncased-sentiment",  # 범용 다국어 감성(1~5 star)
-    "product": "cardiffnlp/twitter-xlm-roberta-base-sentiment"               # 상품평(NSMC) 계열 (예: nsmc 학습 모델, 실패시 fallback)
+    "finbert": "snunlp/KR-FinBERT-SC",
+    "elite": "nlptown/bert-base-multilingual-uncased-sentiment",
+    "product": "cardiffnlp/twitter-xlm-roberta-base-sentiment"
 }
 
-# Sidebar: 모델 아이디 재정의 (사용자가 직접 입력 가능)
 st.sidebar.subheader("모델 설정 (원하지 않으면 기본 사용)")
 finbert_id = st.sidebar.text_input("금융 특화 모델 ID", DEFAULT_MODEL_IDS["finbert"])
 elite_id = st.sidebar.text_input("범용(엘리트) 모델 ID", DEFAULT_MODEL_IDS["elite"])
@@ -157,12 +154,10 @@ def load_models(user_model_ids, token):
                 tok = AutoTokenizer.from_pretrained(mid)
                 mdl = AutoModelForSequenceClassification.from_pretrained(mid)
 
-            # pipeline으로 감성분석 객체 생성
             pipe = pipeline("sentiment-analysis", model=mdl, tokenizer=tok)
             models[key] = pipe
             load_report[key]["loaded"] = True
         except Exception as e1:
-            # 2) fallback: 직접 pipeline으로 모델 아이디를 넘겨 시도 (허브의 파이프라인 파일을 사용할 수 있는 경우)
             try:
                 if token:
                     pipe = pipeline("sentiment-analysis", model=mid, tokenizer=mid, use_auth_token=token)
@@ -171,15 +166,12 @@ def load_models(user_model_ids, token):
                 models[key] = pipe
                 load_report[key]["loaded"] = True
             except Exception as e2:
-                # 로드 실패 — 경고 메시지 저장
                 load_report[key]["error"] = f"Primary error: {e1}; Fallback error: {e2}"
                 models[key] = None
-
     return models, load_report
 
 models, model_load_report = load_models(USER_MODEL_IDS, hf_token)
 
-# 모델 로드 상태 UI 표시 (사이드바)
 st.sidebar.markdown("### 모델 로드 상태")
 for k, r in model_load_report.items():
     if r["loaded"]:
@@ -187,54 +179,36 @@ for k, r in model_load_report.items():
     else:
         st.sidebar.error(f"{k} 실패 — {r['model_id']}")
         if r["error"]:
-            # show truncated error for debugging
             st.sidebar.caption(str(r["error"])[:240])
 
 # ----------------------------
 #  표준화된 label -> score 변환 함수
 # ----------------------------
 def _label_score_to_signed(pred):
-    """
-    다양한 파이프라인 출력 레이블을 -1 ~ +1 범위로 정규화
-    - 일반적: label contains 'NEG'/'POS' or 'negative'/'positive' -> score sign
-    - nlptown: labels like '1 star', '2 star' ... map to (-1 .. +1)
-    - fallback: neutral=0
-    """
     if pred is None:
         return 0.0, "neutral"
     lbl = str(pred.get("label", "")).lower()
     score = float(pred.get("score", 0.0))
-    # nlptown style: '1 star'..'5 star'
     if "star" in lbl:
         try:
             n = int(lbl.split()[0])
-            # map 1..5 -> -1..+1  (3 -> 0)
             signed = (n - 3) / 2.0
             label = "positive" if signed > 0 else ("negative" if signed < 0 else "neutral")
             return float(signed), label
         except Exception:
             pass
-    # common labels
     if any(x in lbl for x in ["neg", "negative", "bad", "부정"]):
         return -score, "negative"
     if any(x in lbl for x in ["pos", "positive", "good", "긍정"]):
         return +score, "positive"
     if "neu" in lbl or "neutral" in lbl:
         return 0.0, "neutral"
-    # fallback: use score as magnitude, but unknown label -> assume positive if score>0.5
     return (score if score <= 1 else 0.0), ("positive" if score >= 0.5 else "neutral")
 
 def analyze_sentiment_multi(texts, models_dict):
-    """
-    texts: list[str]
-    models_dict keys: 'finbert','elite','product' - pipeline objects or None
-    return: list of dicts with FinBERT_Sentiment etc.
-    """
     results = []
     if not texts:
         return results
-
-    # do batch calls for each model where possible
     preds = {}
     for key in ["finbert", "elite", "product"]:
         pipe = models_dict.get(key)
@@ -242,10 +216,8 @@ def analyze_sentiment_multi(texts, models_dict):
             preds[key] = [None]*len(texts)
         else:
             try:
-                # some pipelines accept list->batch, some might error; wrap in try
                 preds[key] = pipe(texts)
             except Exception:
-                # per-item fallback
                 tmp = []
                 for t in texts:
                     try:
@@ -253,7 +225,6 @@ def analyze_sentiment_multi(texts, models_dict):
                     except Exception:
                         tmp.append(None)
                 preds[key] = tmp
-
     for i, t in enumerate(texts):
         fin_s, fin_l = _label_score_to_signed(preds["finbert"][i] if preds.get("finbert") else None)
         el_s, el_l = _label_score_to_signed(preds["elite"][i] if preds.get("elite") else None)
@@ -262,7 +233,6 @@ def analyze_sentiment_multi(texts, models_dict):
             "FinBERT_Sentiment": fin_s, "FinBERT_Label": fin_l,
             "Elite_Sentiment": el_s, "Elite_Label": el_l,
             "Product_Sentiment": pr_s, "Product_Label": pr_l,
-            # 호환용 기존 필드 (FinBERT 중심)
             "Sentiment": fin_s, "Label": fin_l
         })
     return results
@@ -288,7 +258,6 @@ def get_news_with_multi_model_analysis(_bq_client, models_dict, keyword, days_li
     project_id = _bq_client.project
     full_table_id = f"{project_id}.{BQ_DATASET}.{BQ_TABLE_NEWS}"
 
-    # cache 조회 (간편)
     try:
         time_limit = datetime.now(timezone.utc) - timedelta(days=days_limit)
         query = f"""
@@ -308,7 +277,6 @@ def get_news_with_multi_model_analysis(_bq_client, models_dict, keyword, days_li
         st.sidebar.success(f"✔️ '{keyword}' 최신 분석 결과를 캐시에서 로드했습니다.")
         return df_cache
 
-    # RSS 수집 (Google News)
     all_news = []
     rss_url = f"https://news.google.com/rss/search?q={quote(keyword)}&hl=ko&gl=KR&ceid=KR:ko"
     feed = feedparser.parse(rss_url)
@@ -340,7 +308,6 @@ def get_news_with_multi_model_analysis(_bq_client, models_dict, keyword, days_li
     df_new['Keyword'] = keyword
     df_new['InsertedAt'] = datetime.now(timezone.utc)
 
-    # BigQuery 캐시 저장 시도 (실패해도 UI는 계속)
     try:
         df_to_gbq = df_new[[
             "날짜", "Title", "Keyword", "Sentiment", "Label", "InsertedAt",
@@ -363,7 +330,7 @@ def get_news_with_multi_model_analysis(_bq_client, models_dict, keyword, days_li
 @st.cache_data(ttl=3600)
 def get_categories_from_bq(_client):
     project_id = _client.project
-    table_id = f"{project_id}.{BQ_DATASET}.tds_data"
+    table_id = f"{project_id}.{BQ_DATASET}.{BQ_TABLE_TRADE}"
     try:
         query = f"SELECT DISTINCT Category FROM `{table_id}` WHERE Category IS NOT NULL ORDER BY Category"
         df = _client.query(query).to_dataframe()
@@ -375,7 +342,7 @@ def get_trade_data_from_bq(client, categories):
     if not categories:
         return pd.DataFrame()
     project_id = client.project
-    table_id = f"{project_id}.{BQ_DATASET}.tds_data"
+    table_id = f"{project_id}.{BQ_DATASET}.{BQ_TABLE_TRADE}"
     try:
         query_params = [bigquery.ArrayQueryParameter("categories", "STRING", categories)]
         sql = f"SELECT * FROM `{table_id}` WHERE Category IN UNNEST(@categories)"
@@ -425,7 +392,6 @@ def fetch_naver_trends_data(_client, keywords, start_date, end_date, naver_keys)
             all_data_chunk = []
             for keyword in keywords:
                 keyword_dfs = []
-                # 검색어 인덱스
                 body_search = json.dumps({
                     "startDate": current_start.strftime('%Y-%m-%d'),
                     "endDate": current_end.strftime('%Y-%m-%d'),
@@ -438,7 +404,6 @@ def fetch_naver_trends_data(_client, keywords, start_date, end_date, naver_keys)
                     if not df_search.empty:
                         keyword_dfs.append(df_search.rename(columns={'period': '날짜', 'ratio': f'NaverSearch_{keyword}'}))
 
-                # 쇼핑 인사이트
                 norm_keyword = keyword.lower().replace(' ', '')
                 if norm_keyword in NAVER_SHOPPING_CAT_MAP:
                     cat_id = NAVER_SHOPPING_CAT_MAP[norm_keyword]
@@ -507,6 +472,12 @@ if 'weekly_dfs' not in st.session_state:
     st.session_state.weekly_dfs = {}
 if 'final_df' not in st.session_state:
     st.session_state.final_df = pd.DataFrame()
+if 'fig_decompose' not in st.session_state:
+    st.session_state.fig_decompose = None
+if 'fig_forecast' not in st.session_state:
+    st.session_state.fig_forecast = None
+if 'forecast_data' not in st.session_state:
+    st.session_state.forecast_data = pd.DataFrame()
 
 # BQ client
 bq_client = get_bq_connection()
@@ -627,9 +598,9 @@ file_end_date = pd.to_datetime(raw_trade_df['Date'].max())
 start_date = pd.to_datetime(st.sidebar.date_input('시작일', file_start_date, min_value=file_start_date, max_value=file_end_date))
 end_date = pd.to_datetime(st.sidebar.date_input('종료일', file_end_date, min_value=start_date, max_value=file_end_date))
 
-default_keywords = ", ".join(st.session_state.selected_categories) if st.session_state.selected_categories else ""
-keyword_input = st.sidebar.text_input("트렌드/뉴스 분석 키워드", default_keywords)
-search_keywords = [k.strip() for k in keyword_input.split(',') if k.strip()]
+news_keyword_input = st.sidebar.text_input("뉴스 감성 분석 키워드 (하나만 입력)", st.session_state.selected_categories[0] if st.session_state.selected_categories else "")
+search_keywords_input = st.sidebar.text_input("네이버 트렌드 분석 키워드 (쉼표로 구분)", ",".join(st.session_state.selected_categories) if st.session_state.selected_categories else "")
+search_keywords = [k.strip() for k in search_keywords_input.split(',') if k.strip()]
 
 st.sidebar.subheader("3. 외부 데이터 연동")
 with st.sidebar.expander("🔑 API 키 입력"):
@@ -667,8 +638,8 @@ if st.sidebar.button("📈 네이버 트렌드 가져오기"):
 
 st.sidebar.markdown("##### 뉴스 감성 분석 (다중 모델)")
 if st.sidebar.button("📰 뉴스 감성 분석 실행"):
-    if search_keywords:
-        st.session_state.news_data = get_news_with_multi_model_analysis(bq_client, models, search_keywords[0])
+    if news_keyword_input:
+        st.session_state.news_data = get_news_with_multi_model_analysis(bq_client, models, news_keyword_input)
     else:
         st.sidebar.warning("뉴스 분석 키워드를 입력해주세요.")
 
@@ -748,7 +719,12 @@ with tab2:
                 df['날짜'] = pd.to_datetime(df['날짜'])
                 df_in_range = df[(df['날짜'] >= start_date) & (df['날짜'] <= end_date)]
                 if not df_in_range.empty:
-                    df_weekly = df_in_range.set_index('날짜').resample('W-Mon').mean(numeric_only=True)
+                    # news 데이터는 평균 감성 점수만, search는 모든 컬럼
+                    if name == 'news':
+                        df_weekly = df_in_range.set_index('날짜').resample('W-Mon').mean(numeric_only=True)
+                        df_weekly.rename(columns={'FinBERT_Sentiment': 'NewsSentiment_FinBERT'}, inplace=True)
+                    else:
+                        df_weekly = df_in_range.set_index('날짜').resample('W-Mon').mean(numeric_only=True)
                     df_weekly.index.name = '날짜'
                     weekly_dfs[name] = df_weekly
 
@@ -805,7 +781,6 @@ with tab3:
         news_weekly = dfn.dropna(subset=['날짜']).set_index('날짜').resample('W-Mon').mean(numeric_only=True)
         news_weekly.index.name = '날짜'
 
-        # plot: FinBERT / Elite / Product / Avg
         fig_multi = px.line(
             news_weekly.reset_index(),
             x='날짜',
@@ -834,6 +809,8 @@ with tab4:
         dfs_to_concat = [df for df in weekly_dfs.values() if not df.empty]
         if len(dfs_to_concat) > 1:
             final_df = reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), dfs_to_concat)
+            final_df.index = pd.to_datetime(final_df.index)
+            # 새로운 보간 기법 사용 (선형 보간)
             final_df = final_df.interpolate(method='linear', limit_direction='both').dropna(how='all', axis=1).dropna()
             st.session_state['final_df'] = final_df
 
@@ -863,15 +840,20 @@ with tab5:
     if 'final_df' in st.session_state and not st.session_state['final_df'].empty:
         final_df = st.session_state['final_df']
         forecast_col = st.selectbox("예측 대상 변수 선택", final_df.columns)
+        
+        # 외부 변수(regressors) 선택
+        regressors_cols = [col for col in final_df.columns if col != forecast_col]
+        selected_regressors = st.multiselect("예측에 사용할 외부 변수 선택", regressors_cols, default=[])
+
         if st.button("📈 선택한 변수로 예측 실행하기"):
-            ts_data = final_df[[forecast_col]].dropna()
+            ts_data = final_df[['날짜', forecast_col] + selected_regressors].dropna()
             if len(ts_data) < 24:
                 st.warning(f"최소 24주 이상의 데이터가 필요합니다. 현재: {len(ts_data)}주")
             else:
                 with st.spinner(f"'{forecast_col}' 예측 모델 학습 중..."):
                     st.subheader(f"'{forecast_col}' 시계열 분해")
                     period = 52 if len(ts_data) >= 104 else max(4, int(len(ts_data) / 2))
-                    decomposition = seasonal_decompose(ts_data[forecast_col], model='additive', period=period)
+                    decomposition = seasonal_decompose(ts_data.set_index('날짜')[forecast_col], model='additive', period=period)
                     fig_decompose = go.Figure()
                     fig_decompose.add_trace(go.Scatter(x=decomposition.observed.index, y=decomposition.observed, name='Observed'))
                     fig_decompose.add_trace(go.Scatter(x=decomposition.trend.index, y=decomposition.trend, name='Trend'))
@@ -879,14 +861,28 @@ with tab5:
                     st.session_state['fig_decompose'] = fig_decompose
 
                     st.subheader(f"'{forecast_col}' 미래 12주 예측")
-                    prophet_df = ts_data.reset_index().rename(columns={'날짜': 'ds', forecast_col: 'y'})
+                    prophet_df = ts_data.rename(columns={'날짜': 'ds', forecast_col: 'y'})
                     m = Prophet()
+                    for reg in selected_regressors:
+                        m.add_regressor(reg)
+                    
                     m.fit(prophet_df)
                     future = m.make_future_dataframe(periods=12, freq='W')
+                    # 미래 예측을 위한 외부 변수 데이터프레임 생성
+                    # Prophet은 외부 변수의 미래 값을 알아야 예측 가능
+                    # 여기서는 마지막 관측값으로 미래를 채우는 단순한 방법을 사용
+                    # 실제 프로젝트에서는 외부 변수의 미래값도 예측해야 함
+                    for reg in selected_regressors:
+                        future[reg] = final_df[reg].iloc[-1]
+                    
                     forecast = m.predict(future)
                     fig_forecast = plot_plotly(m, forecast)
                     st.session_state['fig_forecast'] = fig_forecast
                     st.session_state['forecast_data'] = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(12)
+
+                    st.subheader("예측 요인별 기여도")
+                    fig_components = plot_components_plotly(m, forecast)
+                    st.plotly_chart(fig_components, use_container_width=True)
 
         if 'fig_decompose' in st.session_state:
             st.plotly_chart(st.session_state['fig_decompose'], use_container_width=True)
