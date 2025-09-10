@@ -846,17 +846,68 @@ with tab4:
                                                title="통합 데이터 산점도 행렬 (Min-Max Scaling)")
                 st.plotly_chart(fig_matrix, use_container_width=True)
 
-            if len(final_df.columns) > 1:
-                st.subheader("상관관계 히트맵")
-                corr_matrix = final_df.corr(numeric_only=True)
-                fig_heatmap = px.imshow(corr_matrix, text_auto=True, aspect="auto", color_continuous_scale='RdBu_r', range_color=[-1, 1])
-                st.plotly_chart(fig_heatmap, use_container_width=True)
+                # --- 교차 상관관계 분석 (Cross-Correlation) ---
+                st.subheader("교차 상관관계 분석 (최적 시차)")
+                
+                # 분석할 변수 목록 정의
+                variables = scaled_final_df.columns.tolist()
+                if len(variables) < 2:
+                    st.info("교차 상관관계 분석을 위해 두 개 이상의 변수가 필요합니다.")
+                else:
+                    correlations = []
+                    # 최대 시차 (lag) 범위 설정
+                    max_lag = 5 
+                    
+                    # 모든 변수 쌍에 대해 교차 상관관계 계산
+                    for i in range(len(variables)):
+                        for j in range(i + 1, len(variables)):
+                            var1 = variables[i]
+                            var2 = variables[j]
+                            
+                            for lag in range(-max_lag, max_lag + 1):
+                                if lag == 0:
+                                    continue # 0 시차는 일반 상관관계이므로 건너뜀
+                                
+                                # 시차 적용된 데이터의 상관관계 계산
+                                if lag > 0:
+                                    corr = scaled_final_df[var1].corr(scaled_final_df[var2].shift(lag))
+                                else:
+                                    corr = scaled_final_df[var1].shift(-lag).corr(scaled_final_df[var2])
+                                
+                                # 상관계수와 시차 값 저장
+                                if pd.notna(corr):
+                                    correlations.append({
+                                        'var1': var1,
+                                        'var2': var2,
+                                        'lag': lag,
+                                        'correlation': corr
+                                    })
+                    
+                    # 상관관계가 가장 높은 상위 3개 찾기
+                    if correlations:
+                        corr_df = pd.DataFrame(correlations)
+                        corr_df['abs_correlation'] = corr_df['correlation'].abs()
+                        top_3_corrs = corr_df.sort_values(by='abs_correlation', ascending=False).head(3)
+                        
+                        st.markdown("##### 📈 **가장 높은 교차 상관관계 상위 3**")
+                        
+                        for _, row in top_3_corrs.iterrows():
+                            var1 = row['var1']
+                            var2 = row['var2']
+                            lag = row['lag']
+                            corr = row['correlation']
+                            
+                            direction = "긍정적" if corr > 0 else "부정적"
+                            
+                            if lag > 0:
+                                sentence = f"**{var1}**의 변화는 **{abs(lag)}주 후** **{var2}**와 **{direction}** 관계를 가집니다 (상관계수: {corr:.2f})."
+                            else:
+                                sentence = f"**{var2}**의 변화는 **{abs(lag)}주 후** **{var1}**와 **{direction}** 관계를 가집니다 (상관계수: {corr:.2f})."
+                            
+                            st.markdown(f"• {sentence}")
+                    else:
+                        st.info("교차 상관관계를 계산할 수 있는 데이터가 부족합니다.")
 
-                st.subheader("산점도 행렬 (Scatter Matrix)")
-                fig_matrix = px.scatter_matrix(final_df.reset_index(),
-                                               dimensions=final_df.columns,
-                                               title="통합 데이터 산점도 행렬")
-                st.plotly_chart(fig_matrix, use_container_width=True)
 
         
         else:
