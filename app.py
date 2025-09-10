@@ -844,7 +844,7 @@ with tab4:
                 
                 # (NEW) Define variable groups to control the analysis
                 driver_vars = [col for col in scaled_final_df.columns if 'Sentiment' in col or 'Naver' in col]
-                outcome_vars = [col for col in scaled_df_final.columns if '수입' in col or '도매가격' in col]
+                outcome_vars = [col for col in scaled_final_df.columns if '수입' in col or '도매가격' in col]
     
                 if not driver_vars or not outcome_vars:
                     st.info("교차 상관관계 분석을 위한 변수가 부족합니다. 감성/검색량(드라이버)과 수입/가격(결과) 데이터를 모두 불러왔는지 확인해주세요.")
