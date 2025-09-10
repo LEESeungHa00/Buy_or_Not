@@ -839,54 +839,57 @@ with tab4:
                 fig_heatmap = px.imshow(corr_matrix, text_auto=True, aspect="auto", color_continuous_scale='RdBu_r', range_color=[-1, 1])
                 st.plotly_chart(fig_heatmap, use_container_width=True)
 
-                # --- Targeted Cross-Correlation Analysis ---
+                # --- 수정된 교차 상관관계 분석 (최적 시차) ---
                 st.subheader("교차 상관관계 분석 (최적 시차)")
                 
-                # 분석을 통제할 수 있도록 각 데이터를 구분
-                #'driver' 와 'outcome' 변수로 구분해 지정
+                # (NEW) Define variable groups to control the analysis
                 driver_vars = [col for col in scaled_final_df.columns if 'Sentiment' in col or 'Naver' in col]
-                outcome_vars = [col for col in scaled_final_df.columns if '수입' in col or '도매가격' in col]
+                outcome_vars = [col for col in scaled_df_final.columns if '수입' in col or '도매가격' in col]
     
-                # 조건에 맞는 변수가 지정되지 않으면 설명하는 문구를 출력
                 if not driver_vars or not outcome_vars:
                     st.info("교차 상관관계 분석을 위한 변수가 부족합니다. 감성/검색량(드라이버)과 수입/가격(결과) 데이터를 모두 불러왔는지 확인해주세요.")
                 else:
-                    correlations = []
-                    # lag range의 최대 범위를 확인(e.g., +/- 5 weeks)
+                    best_correlations = []
                     max_lag = 5 
                     
-                    # drivers와 outcomes 간의 상관관계만 계산 (중량과 중량, 감성지수와 감성지수 와 같이 같은 계열의 값이 상관도가 높은 것으로 묶이는 것 방지)
+                    # Iterate through all unique driver-outcome pairs
                     for driver in driver_vars:
                         for outcome in outcome_vars:
-                            # Skip if the driver and outcome are the same column (just in case)
                             if driver == outcome:
                                 continue
-                                
+                            
+                            max_corr_val = -1
+                            best_lag = 0
+                            
+                            # Find the single best lag for this specific driver-outcome pair
                             for lag in range(-max_lag, max_lag + 1):
                                 if lag == 0:
-                                    continue # 중복 건너뛰기기
+                                    continue
                                 
                                 if lag > 0:
                                     # Correlation between driver at time t and outcome at time t+lag
                                     corr = scaled_final_df[driver].corr(scaled_final_df[outcome].shift(lag))
                                 else:
                                     # Correlation between driver at time t+lag and outcome at time t
-                                    # This handles negative lags correctly
                                     corr = scaled_final_df[driver].shift(abs(lag)).corr(scaled_final_df[outcome])
                                 
-                                if pd.notna(corr):
-                                    correlations.append({
-                                        'driver': driver,
-                                        'outcome': outcome,
-                                        'lag': lag,
-                                        'correlation': corr
-                                    })
+                                if pd.notna(corr) and abs(corr) > max_corr_val:
+                                    max_corr_val = abs(corr)
+                                    best_lag = lag
+                            
+                            if max_corr_val > 0:
+                                # Store only the single best result for this pair
+                                best_correlations.append({
+                                    'driver': driver,
+                                    'outcome': outcome,
+                                    'lag': best_lag,
+                                    'correlation': max_corr_val if scaled_final_df[driver].corr(scaled_final_df[outcome].shift(best_lag)) > 0 else -max_corr_val
+                                })
                     
-                    # 상위 3개의 상관관계 찾기
-                    if correlations:
-                        corr_df = pd.DataFrame(correlations)
-                        corr_df['abs_correlation'] = corr_df['correlation'].abs()
-                        top_3_corrs = corr_df.sort_values(by='abs_correlation', ascending=False).head(3)
+                    # Find the top 3 strongest relationships from the single-best results
+                    if best_correlations:
+                        best_corr_df = pd.DataFrame(best_correlations)
+                        top_3_corrs = best_corr_df.sort_values(by='correlation', ascending=False, key=lambda x: x.abs()).head(3)
                         
                         st.markdown("##### 📈 **가장 높은 교차 상관관계 상위 3**")
                         
