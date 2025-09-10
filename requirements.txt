@@ -18,4 +18,5 @@ prophet
 feedparser
 captum
 huggingface_hub
-scipy
+xgboost
+scikit-learn
