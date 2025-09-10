@@ -811,6 +811,20 @@ with tab4:
             final_df = reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), dfs_to_concat)
             final_df.index = pd.to_datetime(final_df.index)
             final_df = final_df.interpolate(method='linear', limit_direction='both').dropna(how='all', axis=1).dropna()
+            st.write("---")
+            st.write("### 🔍 데이터 진단")
+            st.info("아래 테이블을 확인하여 모든 데이터가 올바르게 병합되었는지 확인하세요.")
+            st.write("#### 병합 대상 데이터프레임 목록:")
+            for name, df in weekly_dfs.items():
+                st.write(f"- **{name.capitalize()}** DataFrame:")
+                st.dataframe(df.head())
+                st.write(f"  컬럼: {df.columns.tolist()}")
+            
+            st.write("#### 최종 병합될 데이터프레임 (final_df) 미리보기:")
+            final_df_preview = reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), dfs_to_concat)
+            st.dataframe(final_df_preview.head())
+            st.write(f"  컬럼: {final_df_preview.columns.tolist()}")
+            st.write("---")
             
             # '날짜' 컬럼을 제외한 모든 컬럼에 대해 스케일링
             numeric_cols = final_df.select_dtypes(include=np.number).columns
