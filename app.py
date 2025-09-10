@@ -810,14 +810,41 @@ with tab4:
         if len(dfs_to_concat) > 1:
             final_df = reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), dfs_to_concat)
             final_df.index = pd.to_datetime(final_df.index)
-            # 새로운 보간 기법 사용 (선형 보간)
             final_df = final_df.interpolate(method='linear', limit_direction='both').dropna(how='all', axis=1).dropna()
-            st.session_state['final_df'] = final_df
-
-            st.subheader("통합 데이터 시각화")
-            df_long = final_df.reset_index().melt(id_vars='날짜', var_name='데이터 종류', value_name='값')
-            fig = px.line(df_long, x='날짜', y='값', color='데이터 종류', title="통합 데이터 시계열 추이")
+            
+            # '날짜' 컬럼을 제외한 모든 컬럼에 대해 스케일링
+            numeric_cols = final_df.select_dtypes(include=np.number).columns
+            scaled_final_df = final_df.copy()
+            for col in numeric_cols:
+                min_val = scaled_final_df[col].min()
+                max_val = scaled_final_df[col].max()
+                if max_val - min_val > 0:
+                    scaled_final_df[col] = (scaled_final_df[col] - min_val) / (max_val - min_val)
+                else:
+                    scaled_final_df[col] = 0.0
+            
+            st.session_state['final_df'] = final_df # 원본 데이터는 유지
+            st.session_state['scaled_final_df'] = scaled_final_df # 스케일링된 데이터 저장
+            
+            st.subheader("통합 데이터 시각화 (스케일링 적용)")
+            # df_long 대신 scaled_final_df 사용
+            df_long = scaled_final_df.reset_index().melt(id_vars='날짜', var_name='데이터 종류', value_name='값')
+            fig = px.line(df_long, x='날짜', y='값', color='데이터 종류', title="통합 데이터 시계열 추이 (Min-Max Scaling)")
             st.plotly_chart(fig, use_container_width=True)
+
+            if len(final_df.columns) > 1:
+                st.subheader("상관관계 히트맵")
+                # scaled_final_df를 사용하여 상관관계 계산
+                corr_matrix = scaled_final_df.corr(numeric_only=True)
+                fig_heatmap = px.imshow(corr_matrix, text_auto=True, aspect="auto", color_continuous_scale='RdBu_r', range_color=[-1, 1])
+                st.plotly_chart(fig_heatmap, use_container_width=True)
+
+                st.subheader("산점도 행렬 (Scatter Matrix)")
+                # scaled_final_df를 사용하여 산점도 행렬 생성
+                fig_matrix = px.scatter_matrix(scaled_final_df.reset_index(),
+                                               dimensions=scaled_final_df.columns,
+                                               title="통합 데이터 산점도 행렬 (Min-Max Scaling)")
+                st.plotly_chart(fig_matrix, use_container_width=True)
 
             if len(final_df.columns) > 1:
                 st.subheader("상관관계 히트맵")
@@ -830,6 +857,8 @@ with tab4:
                                                dimensions=final_df.columns,
                                                title="통합 데이터 산점도 행렬")
                 st.plotly_chart(fig_matrix, use_container_width=True)
+
+        
         else:
             st.warning("상관관계 분석을 위해 둘 이상의 데이터가 필요합니다.")
     else:
@@ -846,14 +875,17 @@ with tab5:
         selected_regressors = st.multiselect("예측에 사용할 외부 변수 선택", regressors_cols, default=[])
 
         if st.button("📈 선택한 변수로 예측 실행하기"):
-            ts_data = final_df[['날짜', forecast_col] + selected_regressors].dropna()
-            if len(ts_data) < 24:
-                st.warning(f"최소 24주 이상의 데이터가 필요합니다. 현재: {len(ts_data)}주")
+            # 예측에 사용할 데이터 준비
+            ts_data_raw = final_df[['날짜', forecast_col] + selected_regressors].dropna()
+            
+            if len(ts_data_raw) < 24:
+                st.warning(f"최소 24주 이상의 데이터가 필요합니다. 현재: {len(ts_data_raw)}주")
             else:
                 with st.spinner(f"'{forecast_col}' 예측 모델 학습 중..."):
+                    # 시계열 분해 시각화 (원본 데이터 사용)
                     st.subheader(f"'{forecast_col}' 시계열 분해")
-                    period = 52 if len(ts_data) >= 104 else max(4, int(len(ts_data) / 2))
-                    decomposition = seasonal_decompose(ts_data.set_index('날짜')[forecast_col], model='additive', period=period)
+                    period = 52 if len(ts_data_raw) >= 104 else max(4, int(len(ts_data_raw) / 2))
+                    decomposition = seasonal_decompose(ts_data_raw.set_index('날짜')[forecast_col], model='additive', period=period)
                     fig_decompose = go.Figure()
                     fig_decompose.add_trace(go.Scatter(x=decomposition.observed.index, y=decomposition.observed, name='Observed'))
                     fig_decompose.add_trace(go.Scatter(x=decomposition.trend.index, y=decomposition.trend, name='Trend'))
@@ -861,22 +893,45 @@ with tab5:
                     st.session_state['fig_decompose'] = fig_decompose
 
                     st.subheader(f"'{forecast_col}' 미래 12주 예측")
-                    prophet_df = ts_data.rename(columns={'날짜': 'ds', forecast_col: 'y'})
+                    
+                    # Prophet 모델 학습을 위한 데이터프레임 복사
+                    prophet_df = ts_data_raw.copy()
+                    
+                    # Min-Max Scaling 적용 (예측 대상 변수 제외)
+                    # Prophet은 y 변수의 원본 스케일을 유지해야 의미 있는 예측이 가능
+                    for reg in selected_regressors:
+                        min_val = prophet_df[reg].min()
+                        max_val = prophet_df[reg].max()
+                        if max_val - min_val > 0:
+                            prophet_df[reg] = (prophet_df[reg] - min_val) / (max_val - min_val)
+                        else:
+                            prophet_df[reg] = 0.0
+
+                    # 컬럼명 변경
+                    prophet_df = prophet_df.rename(columns={'날짜': 'ds', forecast_col: 'y'})
+
+                    # Prophet 모델 생성 및 학습
                     m = Prophet()
                     for reg in selected_regressors:
                         m.add_regressor(reg)
                     
                     m.fit(prophet_df)
+                    
+                    # 미래 예측을 위한 데이터프레임 생성
                     future = m.make_future_dataframe(periods=12, freq='W')
-                    # 미래 예측을 위한 외부 변수 데이터프레임 생성
-                    # Prophet은 외부 변수의 미래 값을 알아야 예측 가능
-                    # 여기서는 마지막 관측값으로 미래를 채우는 단순한 방법을 사용
+                    
+                    # 미래 기간에 대한 외부 변수 데이터 준비
+                    # 여기서는 가장 최근의 값을 사용하여 미래를 채우는 단순한 방법을 사용
                     # 실제 프로젝트에서는 외부 변수의 미래값도 예측해야 함
                     for reg in selected_regressors:
-                        future[reg] = final_df[reg].iloc[-1]
+                        future[reg] = prophet_df[reg].iloc[-1]
                     
+                    # 예측 수행
                     forecast = m.predict(future)
+
+                    # 예측 결과 시각화
                     fig_forecast = plot_plotly(m, forecast)
+                    st.plotly_chart(fig_forecast, use_container_width=True)
                     st.session_state['fig_forecast'] = fig_forecast
                     st.session_state['forecast_data'] = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(12)
 
