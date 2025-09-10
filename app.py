@@ -322,11 +322,11 @@ def _label_score_to_signed(pred):
     if any(x in lbl for x in ["pos", "positive", "긍정"]): return score, "positive"
     return 0.0, "neutral"
 
-def analyze_sentiment_multi(texts, models_dict):
+def analyze_sentiment_multi(texts, _models_dict):
     results = []
     if not texts: return results
     
-    preds = {key: (model(texts, truncation=True, max_length=512) if model else [None]*len(texts)) for key, model in models_dict.items()}
+    preds = {key: (model(texts, truncation=True, max_length=512) if model else [None]*len(texts)) for key, model in _models_dict.items()}
         
     for i, _ in enumerate(texts):
         fin_s, fin_l = _label_score_to_signed(preds.get("finbert", [])[i] if preds.get("finbert") else None)
@@ -356,10 +356,7 @@ def _fetch_article_text(url):
         return ""
 
 @st.cache_data(ttl=3600)
-def get_news_with_multi_model_analysis(_bq_client, models_dict, keyword, days_limit=7):
-    # This function is cached, so it won't reflect real-time news unless the keyword/days_limit changes.
-    # For a real-time app, consider removing @st.cache_data or using a more complex caching strategy.
-    
+def get_news_with_multi_model_analysis(_bq_client, _models_dict, keyword, days_limit=7):
     project_id = _bq_client.project
     full_table_id = f"{project_id}.{BQ_DATASET}.{BQ_TABLE_NEWS}"
 
@@ -375,7 +372,7 @@ def get_news_with_multi_model_analysis(_bq_client, models_dict, keyword, days_li
         df_cache = pd.DataFrame()
 
     if not df_cache.empty:
-        st.sidebar.success(f"✔️ '{keyword}' 최신 분석 결과를 캐시에서 로드했습니다.")
+        # st.sidebar.success(f"✔️ '{keyword}' 최신 분석 결과를 캐시에서 로드했습니다.")
         return df_cache
 
     all_news = []
@@ -397,7 +394,7 @@ def get_news_with_multi_model_analysis(_bq_client, models_dict, keyword, days_li
 
     df_new = pd.DataFrame(all_news).drop_duplicates(subset=["Title"])
     with st.spinner(f"다중 모델로 '{keyword}' 뉴스 감성 분석 중 ({len(df_new)}건)..."):
-        multi = analyze_sentiment_multi(df_new['ModelInput'].tolist(), models_dict)
+        multi = analyze_sentiment_multi(df_new['ModelInput'].tolist(), _models_dict)
 
     multi_df = pd.DataFrame(multi)
     df_new = pd.concat([df_new.reset_index(drop=True), multi_df], axis=1)
@@ -494,6 +491,7 @@ if st.sidebar.button("🚀 모든 데이터 통합 및 분석 실행"):
         all_weekly_dfs = {'trade': trade_weekly}
 
         if news_keyword_input:
+            # Pass bq_client and models to the function
             news_df = get_news_with_multi_model_analysis(bq_client, models, news_keyword_input)
             if not news_df.empty:
                 news_df['날짜'] = pd.to_datetime(news_df['날짜'])
