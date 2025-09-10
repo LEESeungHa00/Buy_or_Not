@@ -18,3 +18,4 @@ prophet
 feedparser
 captum
 huggingface_hub
+seaborn
