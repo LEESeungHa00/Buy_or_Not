@@ -512,98 +512,98 @@ if not st.session_state.final_df.empty:
         dims = st.multiselect("산점도 표시 변수", scaled_df.columns, default=list(scaled_df.columns[:8]))
         if dims:
             st.plotly_chart(px.scatter_matrix(scaled_df[dims]), use_container_width=True)
-with tab2:
-        st.header("시계열 예측 (Prophet & XGBoost)")
-        prophet_df = final_df.reset_index().rename(columns={final_df.index.name if final_df.index.name else 'index': 'ds'})
-        
-        col1, col2 = st.columns(2)
-        forecast_col = col1.selectbox("예측 대상 변수 (y)", final_df.columns, key="forecast_col")
-        forecast_periods = col2.number_input("예측 기간 (주)", 4, 52, 12, key="forecast_periods")
-        prophet_df = prophet_df.rename(columns={forecast_col: 'y'})
-        
-        regressors = [c for c in prophet_df.columns if c not in ['ds', 'y']]
-        selected_regressors = st.multiselect("외부 예측 변수 (Regressors)", regressors, default=regressors, key="regressors")
-        
-        st.subheader("Prophet 모델 파라미터 튜닝")
-        
-        # ✅ [수정됨] 두 개의 버튼을 하나로 통합
-        if st.button("🤖 최적 파라미터 탐색 및 예측 실행", key="find_and_run_forecast"):
+    with tab2:
+            st.header("시계열 예측 (Prophet & XGBoost)")
+            prophet_df = final_df.reset_index().rename(columns={final_df.index.name if final_df.index.name else 'index': 'ds'})
             
-            # 1. 최적 파라미터 탐색
-            with st.spinner("교차 검증을 통해 최적의 파라미터를 탐색 중입니다... (1~2분 소요)"):
-                best_params = find_best_prophet_params(prophet_df[['ds', 'y'] + selected_regressors], selected_regressors)
-                st.session_state.best_params = best_params
-                st.success("최적 파라미터 탐색 완료!")
-                time.sleep(1) # 사용자 인지를 위한 잠시 대기
-
-            # 2. 탐색된 파라미터를 직접 사용하여 예측 실행 (가장 중요한 변경점)
-            with st.spinner("탐색된 최적 파라미터로 예측을 실행합니다..."):
-                bp = st.session_state.best_params # session_state에서 최신 파라미터 가져오기
+            col1, col2 = st.columns(2)
+            forecast_col = col1.selectbox("예측 대상 변수 (y)", final_df.columns, key="forecast_col")
+            forecast_periods = col2.number_input("예측 기간 (주)", 4, 52, 12, key="forecast_periods")
+            prophet_df = prophet_df.rename(columns={forecast_col: 'y'})
+            
+            regressors = [c for c in prophet_df.columns if c not in ['ds', 'y']]
+            selected_regressors = st.multiselect("외부 예측 변수 (Regressors)", regressors, default=regressors, key="regressors")
+            
+            st.subheader("Prophet 모델 파라미터 튜닝")
+            
+            # ✅ [수정됨] 두 개의 버튼을 하나로 통합
+            if st.button("🤖 최적 파라미터 탐색 및 예측 실행", key="find_and_run_forecast"):
                 
-                # 슬라이더 값이 아닌, 찾은 파라미터 값으로 모델 설정
-                m = Prophet(
-                    changepoint_prior_scale=bp.get('changepoint_prior_scale', 0.05),
-                    seasonality_prior_scale=bp.get('seasonality_prior_scale', 1.0),
-                    seasonality_mode=bp.get('seasonality_mode', 'additive')
-                )
-                
-                for reg in selected_regressors:
-                    m.add_regressor(reg)
-                
+                # 1. 최적 파라미터 탐색
+                with st.spinner("교차 검증을 통해 최적의 파라미터를 탐색 중입니다... (1~2분 소요)"):
+                    best_params = find_best_prophet_params(prophet_df[['ds', 'y'] + selected_regressors], selected_regressors)
+                    st.session_state.best_params = best_params
+                    st.success("최적 파라미터 탐색 완료!")
+                    time.sleep(1) # 사용자 인지를 위한 잠시 대기
+    
+                # 2. 탐색된 파라미터를 직접 사용하여 예측 실행 (가장 중요한 변경점)
+                with st.spinner("탐색된 최적 파라미터로 예측을 실행합니다..."):
+                    bp = st.session_state.best_params # session_state에서 최신 파라미터 가져오기
+                    
+                    # 슬라이더 값이 아닌, 찾은 파라미터 값으로 모델 설정
+                    m = Prophet(
+                        changepoint_prior_scale=bp.get('changepoint_prior_scale', 0.05),
+                        seasonality_prior_scale=bp.get('seasonality_prior_scale', 1.0),
+                        seasonality_mode=bp.get('seasonality_mode', 'additive')
+                    )
+                    
+                    for reg in selected_regressors:
+                        m.add_regressor(reg)
+                    
+                    m.fit(prophet_df[['ds', 'y'] + selected_regressors])
+                    future = m.make_future_dataframe(periods=forecast_periods, freq='W')
+                    future_regressors = prophet_df[['ds'] + selected_regressors].set_index('ds'); last_values = future_regressors.iloc[-1]; future_regressors = future_regressors.reindex(future['ds']).ffill().bfill(); future = pd.concat([future.set_index('ds'), future_regressors], axis=1).reset_index()
+                    forecast = m.predict(future)
+    
+                    # 3. 예측 결과 및 분석 그래프 표시 (기존 '예측 실행' 버튼의 내용)
+                    st.subheader("Prophet 예측 결과"); st.plotly_chart(plot_plotly(m, forecast), use_container_width=True)
+                    st.subheader("Prophet 요인 분해"); st.plotly_chart(plot_components_plotly(m, forecast), use_container_width=True)
+                    st.markdown("---"); st.subheader("모델 진단: 잔차 분석")
+                    df_pred = forecast.set_index('ds')[['yhat']].join(prophet_df.set_index('ds')[['y']]).dropna(); residuals = df_pred['y'] - df_pred['yhat']
+                    diag_col1, diag_col2 = st.columns(2)
+                    with diag_col1:
+                        st.markdown("**잔차 정상성 검정 (ADF Test)**"); adf_result = adfuller(residuals); st.write(f"p-value: {adf_result[1]:.4f}")
+                    with diag_col2:
+                        st.markdown("**잔차 분포**"); st.plotly_chart(ff.create_distplot([residuals], ['residuals'], bin_size=.2, show_rug=False), use_container_width=True)
+                    st.markdown("---"); st.subheader("고급 예측: XGBoost Meta-Forecasting")
+                    ml_df = forecast[['ds', 'trend']].set_index('ds'); available_seasonal_components = []
+                    if 'yearly' in forecast.columns: ml_df = ml_df.join(forecast[['ds', 'yearly']].set_index('ds')); available_seasonal_components.append('yearly')
+                    if 'weekly' in forecast.columns: ml_df = ml_df.join(forecast[['ds', 'weekly']].set_index('ds')); available_seasonal_components.append('weekly')
+                    ml_df = ml_df.join(prophet_df.set_index('ds')).dropna()
+                    X = ml_df[['trend'] + available_seasonal_components + selected_regressors]; y = ml_df['y']
+                    train_size = int(len(X) * 0.85); X_train, X_test, y_train, y_test = X.iloc[:train_size], X.iloc[train_size:], y.iloc[:train_size], y.iloc[train_size:]
+                    xgb_model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=1000, learning_rate=0.01, early_stopping_rounds=50); xgb_model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
+                    y_pred_xgb = xgb_model.predict(X_test); r2, rmse = r2_score(y_test, y_pred_xgb), np.sqrt(mean_squared_error(y_test, y_pred_xgb))
+                    st.metric("XGBoost Test R² Score", f"{r2:.3f}"); st.metric("XGBoost Test RMSE", f"{rmse:.3f}")
+                    fig_xgb = go.Figure(); fig_xgb.add_trace(go.Scatter(x=y_train.index, y=y_train, name='Train')); fig_xgb.add_trace(go.Scatter(x=y_test.index, y=y_test, name='Test (Actual)')); fig_xgb.add_trace(go.Scatter(x=y_test.index, y=y_pred_xgb, name='XGBoost Prediction'))
+                    st.plotly_chart(fig_xgb, use_container_width=True)
+                    feature_imp = pd.DataFrame(sorted(zip(xgb_model.feature_importances_, X.columns)), columns=['Value','Feature'])
+                    st.plotly_chart(px.bar(feature_imp, x="Value", y="Feature", orientation='h', title="Feature Importance"), use_container_width=True)
+                    with st.expander("🔍 XGBoost 종합 결과 해석"): st.markdown(guide_content.split("`R² Score`")[1])
+    
+            st.markdown("---")
+            st.write("또는, 아래 슬라이더를 이용해 파라미터를 수동으로 조정한 후 예측을 실행할 수도 있습니다.")
+            
+            bp = st.session_state.best_params
+            p_col1, p_col2, p_col3 = st.columns(3)
+            
+            # UI 슬라이더들은 여전히 session_state 값을 기본값으로 보여줌
+            changepoint_prior_scale = p_col1.slider("Trend 유연성", 0.01, 0.5, bp.get('changepoint_prior_scale', 0.05), key="cps")
+            seasonality_prior_scale = p_col2.slider("계절성 강도", 0.01, 10.0, bp.get('seasonality_prior_scale', 1.0), key="sps")
+            seasonality_mode_options = ['additive', 'multiplicative']
+            seasonality_mode_index = seasonality_mode_options.index(bp.get('seasonality_mode', 'additive'))
+            seasonality_mode = p_col3.selectbox("계절성 모드", seasonality_mode_options, index=seasonality_mode_index, key="sm")
+    
+            if st.button("🚀 수동 파라미터로 예측 실행", key="run_manual_forecast"):
+                # '수동 예측 실행' 버튼 로직은 기존과 동일
+                m = Prophet(changepoint_prior_scale=changepoint_prior_scale, seasonality_prior_scale=seasonality_prior_scale, seasonality_mode=seasonality_mode)
+                for reg in selected_regressors: m.add_regressor(reg)
                 m.fit(prophet_df[['ds', 'y'] + selected_regressors])
                 future = m.make_future_dataframe(periods=forecast_periods, freq='W')
                 future_regressors = prophet_df[['ds'] + selected_regressors].set_index('ds'); last_values = future_regressors.iloc[-1]; future_regressors = future_regressors.reindex(future['ds']).ffill().bfill(); future = pd.concat([future.set_index('ds'), future_regressors], axis=1).reset_index()
                 forecast = m.predict(future)
-
-                # 3. 예측 결과 및 분석 그래프 표시 (기존 '예측 실행' 버튼의 내용)
                 st.subheader("Prophet 예측 결과"); st.plotly_chart(plot_plotly(m, forecast), use_container_width=True)
-                st.subheader("Prophet 요인 분해"); st.plotly_chart(plot_components_plotly(m, forecast), use_container_width=True)
-                st.markdown("---"); st.subheader("모델 진단: 잔차 분석")
-                df_pred = forecast.set_index('ds')[['yhat']].join(prophet_df.set_index('ds')[['y']]).dropna(); residuals = df_pred['y'] - df_pred['yhat']
-                diag_col1, diag_col2 = st.columns(2)
-                with diag_col1:
-                    st.markdown("**잔차 정상성 검정 (ADF Test)**"); adf_result = adfuller(residuals); st.write(f"p-value: {adf_result[1]:.4f}")
-                with diag_col2:
-                    st.markdown("**잔차 분포**"); st.plotly_chart(ff.create_distplot([residuals], ['residuals'], bin_size=.2, show_rug=False), use_container_width=True)
-                st.markdown("---"); st.subheader("고급 예측: XGBoost Meta-Forecasting")
-                ml_df = forecast[['ds', 'trend']].set_index('ds'); available_seasonal_components = []
-                if 'yearly' in forecast.columns: ml_df = ml_df.join(forecast[['ds', 'yearly']].set_index('ds')); available_seasonal_components.append('yearly')
-                if 'weekly' in forecast.columns: ml_df = ml_df.join(forecast[['ds', 'weekly']].set_index('ds')); available_seasonal_components.append('weekly')
-                ml_df = ml_df.join(prophet_df.set_index('ds')).dropna()
-                X = ml_df[['trend'] + available_seasonal_components + selected_regressors]; y = ml_df['y']
-                train_size = int(len(X) * 0.85); X_train, X_test, y_train, y_test = X.iloc[:train_size], X.iloc[train_size:], y.iloc[:train_size], y.iloc[train_size:]
-                xgb_model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=1000, learning_rate=0.01, early_stopping_rounds=50); xgb_model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
-                y_pred_xgb = xgb_model.predict(X_test); r2, rmse = r2_score(y_test, y_pred_xgb), np.sqrt(mean_squared_error(y_test, y_pred_xgb))
-                st.metric("XGBoost Test R² Score", f"{r2:.3f}"); st.metric("XGBoost Test RMSE", f"{rmse:.3f}")
-                fig_xgb = go.Figure(); fig_xgb.add_trace(go.Scatter(x=y_train.index, y=y_train, name='Train')); fig_xgb.add_trace(go.Scatter(x=y_test.index, y=y_test, name='Test (Actual)')); fig_xgb.add_trace(go.Scatter(x=y_test.index, y=y_pred_xgb, name='XGBoost Prediction'))
-                st.plotly_chart(fig_xgb, use_container_width=True)
-                feature_imp = pd.DataFrame(sorted(zip(xgb_model.feature_importances_, X.columns)), columns=['Value','Feature'])
-                st.plotly_chart(px.bar(feature_imp, x="Value", y="Feature", orientation='h', title="Feature Importance"), use_container_width=True)
-                with st.expander("🔍 XGBoost 종합 결과 해석"): st.markdown(guide_content.split("`R² Score`")[1])
-
-        st.markdown("---")
-        st.write("또는, 아래 슬라이더를 이용해 파라미터를 수동으로 조정한 후 예측을 실행할 수도 있습니다.")
-        
-        bp = st.session_state.best_params
-        p_col1, p_col2, p_col3 = st.columns(3)
-        
-        # UI 슬라이더들은 여전히 session_state 값을 기본값으로 보여줌
-        changepoint_prior_scale = p_col1.slider("Trend 유연성", 0.01, 0.5, bp.get('changepoint_prior_scale', 0.05), key="cps")
-        seasonality_prior_scale = p_col2.slider("계절성 강도", 0.01, 10.0, bp.get('seasonality_prior_scale', 1.0), key="sps")
-        seasonality_mode_options = ['additive', 'multiplicative']
-        seasonality_mode_index = seasonality_mode_options.index(bp.get('seasonality_mode', 'additive'))
-        seasonality_mode = p_col3.selectbox("계절성 모드", seasonality_mode_options, index=seasonality_mode_index, key="sm")
-
-        if st.button("🚀 수동 파라미터로 예측 실행", key="run_manual_forecast"):
-            # '수동 예측 실행' 버튼 로직은 기존과 동일
-            m = Prophet(changepoint_prior_scale=changepoint_prior_scale, seasonality_prior_scale=seasonality_prior_scale, seasonality_mode=seasonality_mode)
-            for reg in selected_regressors: m.add_regressor(reg)
-            m.fit(prophet_df[['ds', 'y'] + selected_regressors])
-            future = m.make_future_dataframe(periods=forecast_periods, freq='W')
-            future_regressors = prophet_df[['ds'] + selected_regressors].set_index('ds'); last_values = future_regressors.iloc[-1]; future_regressors = future_regressors.reindex(future['ds']).ffill().bfill(); future = pd.concat([future.set_index('ds'), future_regressors], axis=1).reset_index()
-            forecast = m.predict(future)
-            st.subheader("Prophet 예측 결과"); st.plotly_chart(plot_plotly(m, forecast), use_container_width=True)
-            
+                
     with tab3:
         st.header("통합 데이터 (주별)")
         st.dataframe(final_df)
