@@ -498,7 +498,12 @@ def fetch_naver_trends_data(_client, keywords, start_date, end_date, naver_keys)
 # Initialize BQ Client and session state
 bq_client = get_bq_connection()
 if bq_client is None: st.stop()
+hf_token = st.secrets.get("huggingface", {}).get("token")
+models = load_models(DEFAULT_MODEL_IDS, hf_token)
 if 'final_df' not in st.session_state: st.session_state.final_df = pd.DataFrame()
+if 'raw_news_df' not in st.session_state: st.session_state.raw_news_df = pd.DataFrame()
+if 'best_params' not in st.session_state: st.session_state.best_params = None
+
 
 # ----------------------------
 #  Sidebar: UI & Data Loading
@@ -509,69 +514,55 @@ selected_categories = st.sidebar.multiselect("분석할 품목 선택", categori
 start_date = pd.to_datetime(st.sidebar.date_input('시작일', datetime(2022, 1, 1)))
 end_date = pd.to_datetime(st.sidebar.date_input('종료일', datetime.now()))
 news_keyword_input = st.sidebar.text_input("뉴스 분석 키워드", selected_categories[0] if selected_categories else "")
-search_keywords_input = st.sidebar.text_input("네이버 트렌드 키워드 (쉼표로 구분)", ",".join(selected_categories) if selected_categories else "")
-search_keywords = [k.strip() for k in search_keywords_input.split(',') if k.strip()]
+naver_keywords_input = st.sidebar.text_input("네이버 트렌드 키워드 (쉼표 구분)", selected_categories[0] if selected_categories else "")
 
 with st.sidebar.expander("🔑 API 키 입력 (선택)"):
     naver_client_id = st.text_input("Naver API Client ID", type="password")
     naver_client_secret = st.text_input("Naver API Client Secret", type="password")
-    st.sidebar.markdown("---")
     kamis_api_key = st.text_input("KAMIS API Key", type="password")
     kamis_api_id = st.text_input("KAMIS API ID", type="password")
-    st.sidebar.markdown("##### KAMIS 농산물 가격 선택")
+
+st.sidebar.subheader("🌍 외부 가격 데이터 소스")
+price_source = st.sidebar.radio("가격 소스 선택", ["KAMIS 국내 도매가격", "Yahoo Finance 선물 가격"])
+if price_source == "KAMIS 국내 도매가격":
     kamis_item_name = st.sidebar.selectbox("품목 선택", list(KAMIS_FULL_DATA.keys()))
-    kamis_kind_name = None
-    if kamis_item_name:
-        kamis_kind_name = st.sidebar.selectbox("품종 선택", list(KAMIS_FULL_DATA[kamis_item_name]['kinds'].keys()))
+    kamis_kind_name = st.sidebar.selectbox("품종 선택", list(KAMIS_FULL_DATA[kamis_item_name]['kinds'].keys())) if kamis_item_name else ""
+else: selected_commodity = st.sidebar.selectbox("선물 품목 선택", list(COMMODITY_TICKERS.keys()))
 
 if st.sidebar.button("🚀 모든 데이터 통합 및 분석 실행"):
-    if not selected_categories:
-        st.error("분석할 품목을 1개 이상 선택해주세요.")
-    else:
-        with st.spinner("모든 데이터를 로드하고 통합하는 중입니다..."):
-            trade_df = get_trade_data_from_bq(bq_client, selected_categories)
-            trade_df_in_range = trade_df[(trade_df['Date'] >= start_date) & (trade_df['Date'] <= end_date)]
-            
-            if trade_df_in_range.empty:
-                st.error("선택된 기간에 해당하는 데이터가 없습니다.")
-            else:
-                trade_agg = trade_df_in_range.groupby('Date').agg(Value=('Value', 'sum'), Volume=('Volume', 'sum')).copy()
-                trade_agg.set_index(pd.to_datetime(trade_agg.index), inplace=True)
-                trade_weekly = trade_agg.resample('W-Mon').agg(수입액_USD=('Value', 'sum'), 수입량_KG=('Volume', 'sum')).copy()
-                trade_weekly['수입단가_USD_KG'] = trade_weekly['수입액_USD'] / trade_weekly['수입량_KG']
-                trade_weekly.index.name = '날짜'
-                
-                all_weekly_dfs = {'trade': trade_weekly}
-
-                if news_keyword_input:
-                    news_df = get_news_with_multi_model_analysis(bq_client, models, news_keyword_input)
-                    if not news_df.empty:
-                        news_df['날짜'] = pd.to_datetime(news_df['날짜'])
-                        sentiment_cols = [col for col in news_df.columns if 'Sentiment' in col]
-                        news_weekly = news_df.set_index('날짜')[sentiment_cols].resample('W-Mon').mean()
-                        all_weekly_dfs['news'] = news_weekly.rename(columns=lambda x: 'News_' + x.replace("News_", ""))
-
-                if search_keywords and naver_client_id and naver_client_secret:
-                    naver_df = fetch_naver_trends_data(bq_client, search_keywords, start_date, end_date, {'id': naver_client_id, 'secret': naver_client_secret})
-                    if not naver_df.empty:
-                        naver_df['날짜'] = pd.to_datetime(naver_df['날짜'])
-                        naver_weekly = naver_df.set_index('날짜').resample('W-Mon').mean()
-                        all_weekly_dfs['naver'] = naver_weekly
-
-                if kamis_api_key and kamis_api_id and kamis_item_name and kamis_kind_name:
-                    item_info = KAMIS_FULL_DATA[kamis_item_name].copy()
-                    item_info['kind_code'] = item_info['kinds'][kamis_kind_name]
-                    item_info['rank_code'] = '01'
-                    kamis_df = fetch_kamis_data(bq_client, item_info, start_date, end_date, {'key': kamis_api_key, 'id': kamis_api_id})
-                    if not kamis_df.empty:
-                        kamis_df['날짜'] = pd.to_datetime(kamis_df['날짜'])
-                        kamis_weekly = kamis_df.set_index('날짜').resample('W-Mon').mean()
-                        all_weekly_dfs['kamis'] = kamis_weekly
-
-                final_df = reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), all_weekly_dfs.values())
-                final_df = final_df.interpolate(method='time').fillna(method='bfill').fillna(method='ffill')
-                st.session_state.final_df = final_df.dropna(how='all', axis=1).replace([np.inf, -np.inf], np.nan).dropna()
-                st.success("데이터 통합 완료!")
+    with st.spinner("데이터 통합 및 분석 중..."):
+        trade_df = get_trade_data_from_bq(bq_client, selected_categories)
+        news_df = get_news_with_multi_model_analysis(bq_client, models, news_keyword_input)
+        st.session_state.raw_news_df = news_df
+        
+        naver_keys = {'id': naver_client_id, 'secret': naver_client_secret}
+        naver_keywords = [k.strip() for k in naver_keywords_input.split(',') if k.strip()]
+        naver_df = fetch_naver_trends_data(naver_keywords, start_date, end_date, naver_keys) if naver_keywords and naver_client_id else pd.DataFrame()
+        
+        external_price_df = pd.DataFrame()
+        if price_source == "KAMIS 국내 도매가격":
+            if kamis_item_name and kamis_kind_name and kamis_api_key and kamis_api_id:
+                kamis_keys = {'key': kamis_api_key, 'id': kamis_api_id}
+                item_info = KAMIS_FULL_DATA[kamis_item_name].copy()
+                item_info['kind_code'] = item_info['kinds'][kamis_kind_name]; item_info['rank_code'] = '01'
+                external_price_df = fetch_kamis_data(item_info, start_date, end_date, kamis_keys)
+        else:
+            if selected_commodity:
+                ticker = COMMODITY_TICKERS[selected_commodity]
+                external_price_df = fetch_yfinance_data(selected_commodity, ticker, start_date, end_date)
+        
+        trade_weekly = trade_df.set_index('Date').resample('W-Mon').agg(수입액_USD=('Value', 'sum'), 수입량_KG=('Volume', 'sum')).copy()
+        trade_weekly['수입단가_USD_KG'] = trade_weekly['수입액_USD'] / trade_weekly['수입량_KG']
+        dfs_to_merge = [trade_weekly]
+        if not news_df.empty: dfs_to_merge.append(news_df.drop(columns=['Title']).set_index('날짜').resample('W-Mon').mean())
+        if not naver_df.empty: dfs_to_merge.append(naver_df.set_index('날짜').resample('W-Mon').mean())
+        if not external_price_df.empty: dfs_to_merge.append(external_price_df.resample('W-Mon').mean())
+        
+        final_df = reduce(lambda left, right: pd.merge(left, right, left_index=True, right_index=True, how='outer'), dfs_to_merge)
+        final_df = final_df.interpolate(method='time').fillna(method='bfill').fillna(method='ffill')
+        st.session_state.final_df = final_df.replace([np.inf, -np.inf], np.nan).dropna()
+        st.session_state.best_params = {}
+        st.success("데이터 통합 완료!")
 
 # --- CSV/Excel Upload Section ---
 st.sidebar.markdown("---")
@@ -667,9 +658,8 @@ guide_content = """
 # ----------------------------
 if not st.session_state.final_df.empty:
     final_df = st.session_state.final_df
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 상관관계 분석", "📈 시계열 예측", "📄 통합 데이터", "📰 수집 뉴스 원본", "📘 대시보드 사용법"])
     
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 상관관계 분석", "📈 시계열 예측", "📄 통합 데이터", "📘 대시보드 사용법"])
-
     with tab1:
         st.header("상관관계 분석")
         col1, col2 = st.columns(2)
@@ -754,10 +744,17 @@ if not st.session_state.final_df.empty:
         st.header("통합 데이터 (주별)")
         st.dataframe(final_df)
         st.download_button("CSV로 다운로드", final_df.to_csv(index=False).encode('utf-8-sig'), "integrated_weekly_data.csv")
-        
+    
     with tab4:
-        st.header("대시보드 사용법 가이드")
-        st.markdown(guide_content)
+        st.header("📰 수집 뉴스 원본")
+        if not st.session_state.raw_news_df.empty:
+            st.dataframe(st.session_state.raw_news_df.sort_values(by='날짜', ascending=False))
+        else:
+            st.info("사이드바에서 분석을 실행하면 수집된 뉴스 기사 제목과 감성 점수를 여기서 확인할 수 있습니다.")
+    
+    with tab5:
+        st.header("📘 대시보드 사용법 가이드")
+        st.markdown(guide_content, unsafe_allow_html=True)
 
 else:
     st.info("👈 사이드바에서 분석할 데이터를 선택하고 '모든 데이터 통합 및 분석 실행' 버튼을 눌러주세요.")
