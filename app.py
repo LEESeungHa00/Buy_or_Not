@@ -263,26 +263,100 @@ def get_trade_data_from_bq(client, categories):
     except Exception as e: st.error(f"BigQuery TDS 데이터 로드 오류: {e}"); return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
-def fetch_yfinance_data(ticker_name, ticker_symbol, start_date, end_date):
-    data_frames = []
-    current_start = start_date
-    while current_start < end_date:
-        current_end = current_start + timedelta(days=365 * 2)
-        if current_end > end_date: current_end = end_date
+def fetch_yfinance_data(ticker_name, ticker_symbol, start_date, end_date, max_retries=3, chunk_days=730):
+    """
+    yfinance 데이터를 안정적으로 가져오는 함수
+    - 전체 기간 먼저 시도, 실패 시 chunk로 나누어 재시도
+    - 'Close' 없으면 'Adj Close' 사용
+    - index tz 제거, 중복 제거, 정렬
+    - 빈 값(NaN)은 dropna로 제거
+    - 반환 DataFrame: index = 날짜, 컬럼 = f'Futures_{ticker_name}'
+    """
+    # datetime 변환 (tz 문제 방지)
+    if hasattr(start_date, 'to_pydatetime'):
+        start_date = start_date.to_pydatetime()
+    if hasattr(end_date, 'to_pydatetime'):
+        end_date = end_date.to_pydatetime()
+
+    def _clean_df(df):
+        if df is None or df.empty:
+            return pd.DataFrame()
+        # Close 컬럼 확인 (없으면 Adj Close 사용)
+        if 'Close' not in df.columns and 'Adj Close' in df.columns:
+            df = df.rename(columns={'Adj Close': 'Close'})
+        if 'Close' not in df.columns:
+            return pd.DataFrame()
+        df = df[['Close']].rename(columns={'Close': f'Futures_{ticker_name}'})
+        # tz 제거
         try:
-            data = yf.download(ticker_symbol, start=current_start, end=current_end, progress=False)
-            if not data.empty:
-                data_frames.append(data)
+            if hasattr(df.index, 'tz') and df.index.tz is not None:
+                df.index = df.index.tz_convert(None)
+        except Exception:
+            pass
+        df.index = pd.to_datetime(df.index)
+        df = df[~df.index.duplicated(keep='first')]
+        df = df.sort_index()
+        # 빈 값 제거
+        df = df.dropna()
+        return df
+
+    # 1) 전체 기간 먼저 시도
+    for attempt in range(max_retries):
+        try:
+            df_full = yf.download(
+                ticker_symbol,
+                start=start_date,
+                end=end_date + timedelta(days=1),
+                progress=False,
+                threads=True,
+                interval='1d'
+            )
+            cleaned = _clean_df(df_full)
+            if not cleaned.empty:
+                return cleaned
         except Exception as e:
-            st.sidebar.error(f"'{current_start.date()}'~'{current_end.date()}' 구간 데이터 로드 중 오류: {e}")
-        current_start = current_end + timedelta(days=1)
-    if not data_frames:
-        st.sidebar.warning(f"'{ticker_name}'에 대한 선물 데이터를 가져올 수 없습니다. 기간이나 티커를 확인해주세요.")
+            st.sidebar.warning(f"yfinance 전체 요청 실패: {e} (시도 {attempt+1}/{max_retries})")
+        time.sleep(1 + attempt * 2)
+
+    # 2) 실패 시 chunk 방식
+    cur_start = start_date
+    frames = []
+    while cur_start <= end_date:
+        cur_end = cur_start + timedelta(days=chunk_days - 1)
+        if cur_end > end_date:
+            cur_end = end_date
+        success = False
+        for attempt in range(max_retries):
+            try:
+                tmp = yf.download(
+                    ticker_symbol,
+                    start=cur_start,
+                    end=cur_end + timedelta(days=1),
+                    progress=False,
+                    threads=True,
+                    interval='1d'
+                )
+                cleaned = _clean_df(tmp)
+                if not cleaned.empty:
+                    frames.append(cleaned)
+                success = True
+                break
+            except Exception as e:
+                st.sidebar.warning(f"yfinance 청크 {cur_start.date()}~{cur_end.date()} 실패: {e} (시도 {attempt+1}/{max_retries})")
+                time.sleep(1 + attempt * 2)
+        if not success:
+            st.sidebar.error(f"yfinance: {cur_start.date()}~{cur_end.date()} 구간 데이터를 못 불러왔습니다.")
+        cur_start = cur_end + timedelta(days=1)
+        time.sleep(0.2)  # rate limit 완화
+
+    if not frames:
+        st.sidebar.warning(f"'{ticker_name}'에 대한 선물 데이터를 가져올 수 없습니다.")
         return pd.DataFrame()
-    full_data = pd.concat(data_frames)
-    df = full_data[['Close']].rename(columns={'Close': f'Futures_{ticker_name}'})
-    df.index.name = '날짜'
-    return df
+
+    full = pd.concat(frames)
+    full = full[~full.index.duplicated(keep='first')].sort_index()
+    full = full.dropna()
+    return full
 
 @st.cache_data(ttl=3600)
 def fetch_kamis_data(item_info, start_date, end_date, kamis_keys):
