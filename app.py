@@ -263,20 +263,68 @@ def get_trade_data_from_bq(client, categories):
         return df
     except Exception as e: st.error(f"BigQuery TDS 데이터 로드 오류: {e}"); return pd.DataFrame()
 
+# ✅ [수정됨] yfinance 라이브러리 대신 REST API를 직접 호출하는 안정적인 방식으로 변경
 @st.cache_data(ttl=3600)
 def fetch_yfinance_data(ticker: str, start_date: datetime, end_date: datetime) -> pd.DataFrame:
     """
-    yfinance 라이브러리를 사용해 선물 가격 데이터 가져오기
+    requests를 사용해 Yahoo Finance REST API를 직접 호출해서 시세 데이터 가져오기
+    (yfinance 라이브러리가 작동하지 않을 경우의 대안)
     """
     try:
-        df = yf.download(ticker, start=start_date, end=end_date, progress=False)
-        if df.empty:
-            st.warning(f"'{ticker}'에 대한 데이터를 Yahoo Finance에서 가져올 수 없습니다.")
+        start_ts = int(start_date.timestamp())
+        end_ts = int(end_date.timestamp())
+        
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+        params = {
+            "period1": start_ts,
+            "period2": end_ts,
+            "interval": "1d",
+            "events": "history",
+        }
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        r.raise_for_status()  # HTTP 에러가 발생하면 예외를 발생시킴
+        
+        data = r.json()
+
+        if "chart" not in data or "result" not in data["chart"] or not data["chart"]["result"]:
+            st.warning(f"'{ticker}' 데이터를 가져오는 데 실패했습니다. 응답에 유효한 데이터가 없습니다.")
             return pd.DataFrame()
+
+        result = data["chart"]["result"][0]
+        timestamps = result.get("timestamp", [])
+        if not timestamps:
+            st.warning(f"'{ticker}'에 대한 타임스탬프 데이터를 찾을 수 없습니다.")
+            return pd.DataFrame()
+
+        indicators = result["indicators"]["quote"][0]
+        
+        df = pd.DataFrame(indicators)
+        df["Date"] = pd.to_datetime(timestamps, unit="s").date
+        df['Date'] = pd.to_datetime(df['Date']) # Datetime 객체로 변환
+        df = df.set_index("Date")
+        
+        # 'close' 컬럼이 없을 수도 있으므로 확인 후 이름 변경
+        if 'close' in df.columns:
+            df = df.rename(columns={'close': 'Close'})
+        
+        df = df.dropna(how="any")
+
+        if df.empty:
+            st.warning(f"'{ticker}'에 대한 데이터를 처리한 후 남은 데이터가 없습니다.")
+        
         return df
-    except Exception as e:
-        st.error(f"Yahoo Finance 데이터 다운로드 중 오류 발생: {e}")
+
+    except requests.exceptions.HTTPError as http_err:
+        st.error(f"HTTP 오류 발생: {http_err} - 티커 '{ticker}'가 유효하지 않거나 API 접근에 문제가 있을 수 있습니다.")
         return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Yahoo Finance 데이터 처리 중 예기치 않은 오류 발생: {e}")
+        return pd.DataFrame()
+
 
 @st.cache_data(ttl=3600)
 def fetch_kamis_data(item_info, start_date, end_date, kamis_keys):
@@ -406,8 +454,8 @@ if st.sidebar.button("🚀 모든 데이터 통합 및 분석 실행"):
             if selected_commodity:
                 ticker = COMMODITY_TICKERS[selected_commodity]
                 yf_df = fetch_yfinance_data(ticker, start_date, end_date)
-                if not yf_df.empty:
-                    external_price_df = yf_df[['Close']].rename(columns={'Close': f'Futures_{selected_commodity}_Close'})
+                if not yf_df.empty and 'Close' in yf_df.columns:
+                     external_price_df = yf_df[['Close']].rename(columns={'Close': f'Futures_{selected_commodity}_Close'})
 
         trade_weekly = trade_df.set_index('Date').resample('W-Mon').agg(수입액_USD=('Value', 'sum'), 수입량_KG=('Volume', 'sum')).copy()
         trade_weekly['수입단가_USD_KG'] = trade_weekly['수입액_USD'] / trade_weekly['수입량_KG']
@@ -425,9 +473,8 @@ if st.sidebar.button("🚀 모든 데이터 통합 및 분석 실행"):
             dfs_to_merge.append(external_price_df.resample('W-Mon').mean())
 
         final_df = reduce(lambda left, right: pd.merge(left, right, left_index=True, right_index=True, how='outer'), dfs_to_merge)
-        
-        # ✅ [수정됨] 시계열 예측을 위해 비어있는 값을 보간(interpolate)하고, 미래(bfill)와 과거(ffill) 값으로 채웁니다.
-        # 이 방식은 데이터의 연속성을 보장하여 Prophet 모델의 성능을 안정화시킵니다.
+
+        # 시계열 예측을 위해 비어있는 값을 보간(interpolate)하고, 미래(bfill)와 과거(ffill) 값으로 채웁니다.
         final_df = final_df.interpolate(method='time').bfill().ffill()
         final_df = final_df.replace([np.inf, -np.inf], np.nan).dropna()
 
