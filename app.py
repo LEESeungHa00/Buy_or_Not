@@ -20,6 +20,7 @@ from prophet.diagnostics import cross_validation, performance_metrics
 from kamis_data import KAMIS_FULL_DATA
 import yfinance as yf
 import itertools
+import time 
 
 # Advanced Analysis Libraries
 from scipy.stats import pearsonr, spearmanr
