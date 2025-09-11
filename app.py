@@ -294,7 +294,6 @@ def fetch_naver_trends_data(keywords, start_date, end_date, naver_keys):
     st.sidebar.warning("Naver API 연동은 현재 비활성화 상태입니다. (Placeholder)")
     return pd.DataFrame()
 
-
 @st.cache_data
 def find_best_prophet_params(_df, _regressors):
     param_grid = {
@@ -379,9 +378,18 @@ if st.sidebar.button("🚀 모든 데이터 통합 및 분석 실행"):
         trade_weekly = trade_df.set_index('Date').resample('W-Mon').agg(수입액_USD=('Value', 'sum'), 수입량_KG=('Volume', 'sum')).copy()
         trade_weekly['수입단가_USD_KG'] = trade_weekly['수입액_USD'] / trade_weekly['수입량_KG']
         dfs_to_merge = [trade_weekly]
-        if not news_df.empty: dfs_to_merge.append(news_df.drop(columns=['Title']).set_index('날짜').resample('W-Mon').mean())
-        if not naver_df.empty: dfs_to_merge.append(naver_df.set_index('날짜').resample('W-Mon').mean())
-        if not external_price_df.empty: dfs_to_merge.append(external_price_df.resample('W-Mon').mean())
+        
+        if not news_df.empty:
+            news_df['날짜'] = pd.to_datetime(news_df['날짜'])
+            dfs_to_merge.append(news_df.drop(columns=['Title']).set_index('날짜').resample('W-Mon').mean())
+        if not naver_df.empty:
+            naver_df['날짜'] = pd.to_datetime(naver_df['날짜'])
+            dfs_to_merge.append(naver_df.set_index('날짜').resample('W-Mon').mean())
+        if not external_price_df.empty:
+            if '날짜' in external_price_df.columns:
+                external_price_df['날짜'] = pd.to_datetime(external_price_df['날짜'])
+                external_price_df = external_price_df.set_index('날짜')
+            dfs_to_merge.append(external_price_df.resample('W-Mon').mean())
         
         final_df = reduce(lambda left, right: pd.merge(left, right, left_index=True, right_index=True, how='outer'), dfs_to_merge)
         final_df = final_df.interpolate(method='time').fillna(method='bfill').fillna(method='ffill')
@@ -505,7 +513,12 @@ if not st.session_state.final_df.empty:
     with tab3:
         st.header("통합 데이터 (주별)")
         st.dataframe(final_df)
-        st.download_button("CSV로 다운로드", final_df.to_csv(index=False).encode('utf-8-sig'), "integrated_weekly_data.csv")
+        st.download_button(
+            label="CSV로 다운로드",
+            data=final_df.to_csv(index=False).encode('utf-8-sig'),
+            file_name="integrated_weekly_data.csv",
+            mime='text/csv',
+        )
     
     with tab4:
         st.header("📰 수집 뉴스 원본")
