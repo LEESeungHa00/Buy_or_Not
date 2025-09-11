@@ -16,14 +16,18 @@ import feedparser
 from urllib.parse import quote
 from prophet import Prophet
 from prophet.plot import plot_plotly, plot_components_plotly
+from prophet.diagnostics import cross_validation, performance_metrics
 from kamis_data import KAMIS_FULL_DATA
+import yfinance as yf
+import itertools
 
 # Advanced Analysis Libraries
-from scipy.stats import pearsonr, spearmanr, kendalltau
+from scipy.stats import pearsonr, spearmanr
 from statsmodels.tsa.stattools import adfuller
 from statsmodels.stats.multitest import multipletests
 import xgboost as xgb
 from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.preprocessing import MinMaxScaler
 
 # Transformers / HuggingFace
 from transformers import pipeline
@@ -43,374 +47,202 @@ st.set_page_config(layout="wide")
 st.title("📊 통합 데이터 기반 탐색 및 예측 대시보드")
 
 BQ_DATASET = "data_explorer"
-BQ_TABLE_NAVER = "naver_trends_cache"
-BQ_TABLE_NEWS = "news_sentiment_finbert"
 BQ_TABLE_TRADE = "tds_data"
 
-# ----------------------------
-#  Helper Functions (Analysis & Interpretation)
-# ----------------------------
-@st.cache_data
-def calculate_advanced_correlation(df, method='pearson', p_adjust_method='fdr_bh'):
-    """Calculate correlation matrix and corresponding p-values."""
-    df_numeric = df.select_dtypes(include=np.number).dropna(how='all', axis=1)
-    cols = df_numeric.columns
-    corr_matrix = pd.DataFrame(np.ones((len(cols), len(cols))), index=cols, columns=cols)
-    pval_matrix = pd.DataFrame(np.ones((len(cols), len(cols))), index=cols, columns=cols)
-    
-    pvalues_list = []
-    
-    for i in range(len(cols)):
-        for j in range(i + 1, len(cols)):
-            col1_data = df_numeric[cols[i]].dropna()
-            col2_data = df_numeric[cols[j]].dropna()
-            
-            common_index = col1_data.index.intersection(col2_data.index)
-            if len(common_index) < 3: continue
-
-            col1_data = col1_data.loc[common_index]
-            col2_data = col2_data.loc[common_index]
-
-            if method == 'pearson':
-                corr, pval = pearsonr(col1_data, col2_data)
-            elif method == 'spearman':
-                corr, pval = spearmanr(col1_data, col2_data)
-            else: # kendall
-                corr, pval = kendalltau(col1_data, col2_data)
-                
-            corr_matrix.iloc[i, j] = corr_matrix.iloc[j, i] = corr
-            pval_matrix.iloc[i, j] = pval_matrix.iloc[j, i] = pval
-            pvalues_list.append(pval)
-
-    # Adjust p-values for multiple comparisons
-    if pvalues_list:
-        _, pvals_corrected, _, _ = multipletests(pvalues_list, alpha=0.05, method=p_adjust_method)
-        
-        corrected_pval_matrix = pd.DataFrame(np.ones((len(cols), len(cols))), index=cols, columns=cols)
-        k = 0
-        for i in range(len(cols)):
-            for j in range(i + 1, len(cols)):
-                corrected_pval_matrix.iloc[i, j] = corrected_pval_matrix.iloc[j, i] = pvals_corrected[k]
-                k += 1
-    else:
-        corrected_pval_matrix = pval_matrix
-
-    return corr_matrix, corrected_pval_matrix
-
-
-@st.cache_data
-def find_best_lagged_correlation(df, driver_vars, outcome_vars, max_lag=12):
-    """Find the best time lag for correlation between driver and outcome variables."""
-    best_correlations = []
-    for driver in driver_vars:
-        for outcome in outcome_vars:
-            if driver == outcome: continue
-            
-            max_corr_val = 0
-            best_lag = 0
-            
-            for lag in range(-max_lag, max_lag + 1):
-                try:
-                    shifted_driver = df[driver].shift(lag)
-                    corr = shifted_driver.corr(df[outcome])
-                except Exception:
-                    corr = np.nan
-
-                if pd.notna(corr) and abs(corr) > abs(max_corr_val):
-                    max_corr_val = corr
-                    best_lag = lag
-            
-            if best_lag != 0:
-                best_correlations.append({
-                    'Driver (X)': driver,
-                    'Outcome (Y)': outcome,
-                    'Best Lag (Weeks)': best_lag,
-                    'Correlation': max_corr_val
-                })
-    
-    if not best_correlations:
-        return pd.DataFrame()
-        
-    df_lags = pd.DataFrame(best_correlations)
-    df_lags['Abs Correlation'] = df_lags['Correlation'].abs()
-    return df_lags.sort_values('Abs Correlation', ascending=False).drop(columns=['Abs Correlation'])
-
-def interpret_correlation_groups(corr_matrix, pval_matrix, threshold=0.05):
-    """Generates a human-readable interpretation of correlations between driver and outcome groups."""
-    driver_keywords = ['Naver', 'News_', 'Sentiment', '도매']
-    outcome_keywords = ['수입']
-
-    all_cols = corr_matrix.columns
-    driver_cols = [col for col in all_cols if any(key in col for key in driver_keywords)]
-    outcome_cols = [col for col in all_cols if any(key in col for key in outcome_keywords)]
-    
-    driver_cols = [col for col in driver_cols if col not in outcome_cols]
-
-    if not driver_cols or not outcome_cols:
-        return "자동 해석을 위한 'Driver(원인)' 또는 'Outcome(결과)' 그룹의 변수가 부족합니다. (Driver: 'Naver', 'News', '도매' 등 / Outcome: '수입' 등)"
-
-    strong_corrs = []
-    for driver in driver_cols:
-        for outcome in outcome_cols:
-            if driver not in corr_matrix.index or outcome not in corr_matrix.columns:
-                continue
-
-            corr_val = corr_matrix.loc[driver, outcome]
-            pval = pval_matrix.loc[driver, outcome]
-            
-            if pval < threshold and abs(corr_val) >= 0.4: # Slightly lower threshold for discovery
-                direction = "강한 양의" if corr_val > 0 else "강한 음의"
-                interpretation = (
-                    f"**'{driver}'** (원인)와(과) **'{outcome}'** (결과) 사이에는 "
-                    f"통계적으로 유의미한 **{direction} 상관관계**가 있습니다 (상관계수: {corr_val:.2f}, p-value: {pval:.3f})."
-                )
-                strong_corrs.append({'text': interpretation, 'value': abs(corr_val)})
-    
-    if not strong_corrs:
-        return "현재 설정된 유의수준에서 Driver(원인) 변수와 Outcome(결과) 변수 간의 의미 있는 관계는 발견되지 않았습니다. 변수 선택이나 기간을 변경하여 다시 분석해 보세요."
-        
-    strong_corrs = sorted(strong_corrs, key=lambda x: x['value'], reverse=True)
-    
-    summary = "### 주요 발견 (Driver vs. Outcome):\n\n" + "\n".join([f"- {corr['text']}" for corr in strong_corrs[:5]])
-    summary += "\n\n* **양의 상관관계 (+):** 원인 변수가 증가할 때 결과 변수도 함께 증가하는 경향을 보입니다."
-    summary += "\n* **음의 상관관계 (-):** 원인 변수가 증가할 때 결과 변수는 오히려 감소하는 경향을 보입니다."
-    return summary
-
-def interpret_adf_test(adf_result):
-    """Generates an interpretation of the ADF test result."""
-    p_value = adf_result[1]
-    if p_value < 0.05:
-        return (
-            f"**결론: 모델이 안정적일 가능성이 높습니다.** (p-value: {p_value:.3f})\n\n"
-            "ADF 테스트 결과, 예측 오차(잔차)들이 특정 패턴 없이 무작위적인 '백색소음'에 가깝다는 것을 의미합니다. "
-            "이는 Prophet 모델이 데이터의 주요 추세와 계절성 패턴을 성공적으로 학습했다는 긍정적인 신호입니다."
-        )
-    else:
-        return (
-            f"**결론: 모델 개선의 여지가 있습니다.** (p-value: {p_value:.3f})\n\n"
-            "예측 오차(잔차)에 아직 설명되지 않은 특정 패턴이 남아있을 수 있음을 시사합니다. "
-            "이는 모델이 데이터의 모든 정보를 완전히 학습하지 못했을 가능성을 의미합니다. "
-            "예측력을 높이기 위해 다른 외부 변수(Regressor)를 추가하거나 Prophet 파라미터를 조정하는 것을 고려해볼 수 있습니다."
-        )
-
-def interpret_xgboost_results(r2, rmse, feature_imp_df, y_mean):
-    """Generates an interpretation of XGBoost model results."""
-    r2_perc = r2 * 100
-    rmse_perc = (rmse / y_mean) * 100 if y_mean != 0 else 0
-
-    top_features = feature_imp_df.sort_values('Value', ascending=False).head(3)['Feature'].tolist()
-
-    interpretation = f"""
-    ### XGBoost 모델 성능 요약:
-
-    - **R² Score (설명력): {r2:.3f}**
-      - **의미:** 우리 모델이 예측 대상 변수의 전체 변동성 중 **약 {r2_perc:.1f}%**를 성공적으로 설명하고 있습니다.
-      - **판단:** 1에 가까울수록 좋습니다. 이 수치가 높다는 것은 모델이 데이터의 패턴을 잘 포착하고 있다는 의미입니다.
-
-    - **RMSE (평균 예측 오차): {rmse:.3f}**
-      - **의미:** 모델의 예측값은 실제값과 평균적으로 **약 {rmse:.3f}** 만큼의 오차를 보입니다. (이는 예측 대상 평균값의 약 {rmse_perc:.1f}% 수준입니다.)
-      - **판단:** 0에 가까울수록 좋습니다. 이 수치가 낮다는 것은 예측이 더 정밀하다는 것을 의미합니다.
-
-    ### 예측에 가장 큰 영향을 미친 변수 TOP 3:
-    1. **{top_features[0]}**
-    2. **{top_features[1]}**
-    3. **{top_features[2]}**
-
-    **종합 의견:**
-    이 변수들이 미래 값을 예측하는 데 가장 중요한 역할을 했습니다. 비즈니스 전략 수립 시 이 핵심 지표들의 변화를 주의 깊게 모니터링하는 것이 중요합니다.
-    """
-    return interpretation
-
-# ----------------------------
-#  Helpers: BigQuery + Naver + KAMIS
-# ----------------------------
-@st.cache_resource
-def get_bq_connection():
-    try:
-        creds_dict = st.secrets["gcp_service_account"]
-        creds = service_account.Credentials.from_service_account_info(creds_dict)
-        client = bigquery.Client(credentials=creds, project=creds.project_id)
-        return client
-    except Exception as e:
-        st.error(f"Google BigQuery 연결 실패: secrets.toml을 확인하세요. 오류: {e}")
-        return None
-
-def upload_df_to_bq(client, df, table_id):
-    """Uploads a DataFrame to a specified BigQuery table."""
-    try:
-        pandas_gbq.to_gbq(
-            df,
-            f"{BQ_DATASET}.{table_id}",
-            project_id=client.project,
-            if_exists="append",
-            credentials=client._credentials
-        )
-        return True, None
-    except Exception as e:
-        return False, str(e)
-
-def call_naver_api(url, body, naver_keys):
-    try:
-        request = urllib.request.Request(url)
-        request.add_header("X-Naver-Client-Id", naver_keys['id'])
-        request.add_header("X-Naver-Client-Secret", naver_keys['secret'])
-        request.add_header("Content-Type", "application/json")
-        response = urllib.request.urlopen(request, data=body.encode("utf-8"))
-        if response.getcode() == 200:
-            return json.loads(response.read().decode('utf-8'))
-        return None
-    except Exception as e:
-        st.error(f"Naver API 오류 발생: {e}")
-        return None
-
-@st.cache_data(ttl=3600)
-def fetch_kamis_data(_client, item_info, start_date, end_date, kamis_keys):
-    start_str, end_str = start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')
-    url = (f"http://www.kamis.or.kr/service/price/xml.do?action=periodWholesaleProductList"
-           f"&p_product_cls_code=01&p_startday={start_str}&p_endday={end_str}"
-           f"&p_item_category_code={item_info['cat_code']}&p_item_code={item_info['item_code']}&p_kind_code={item_info['kind_code']}"
-           f"&p_product_rank_code={item_info['rank_code']}&p_convert_kg_yn=Y"
-           f"&p_cert_key={kamis_keys['key']}&p_cert_id={kamis_keys['id']}&p_returntype=json")
-    try:
-        response = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0 KAMISClient/1.0"})
-        if response.status_code == 200 and "data" in response.json() and "item" in response.json()["data"]:
-            price_data = response.json()["data"]["item"]
-            if not price_data:
-                return pd.DataFrame()
-            df_new = pd.DataFrame(price_data)[['regday', 'price']].rename(columns={'regday': '날짜', 'price': '도매가격_원'})
-            def format_kamis_date(date_str):
-                processed_str = str(date_str).replace('/', '-')
-                if processed_str.count('-') == 1:
-                    return f"{start_date.year}-{processed_str}"
-                return processed_str
-            df_new['날짜'] = pd.to_datetime(df_new['날짜'].apply(format_kamis_date), errors='coerce')
-            df_new['도매가격_원'] = pd.to_numeric(df_new['도매가격_원'].astype(str).str.replace(',', ''), errors='coerce')
-            return df_new
-    except Exception as e:
-        st.sidebar.error(f"KAMIS API 호출 중 오류: {e}")
-    return pd.DataFrame()
-# ----------------------------
-#  HuggingFace: 로그인 + 안전한 모델 로드
-# ----------------------------
-hf_token = st.secrets.get("huggingface", {}).get("token")
-if hf_token:
-    try:
-        hf_login(token=hf_token)
-    except Exception as e:
-        st.sidebar.warning(f"HuggingFace 로그인 실패: {e}")
+COMMODITY_TICKERS = {
+    "Coffee": "KC=F", "Cocoa": "CC=F", "Orange Juice": "OJ=F",
+    "Crude Oil (WTI)": "CL=F", "Gold": "GC=F", "Corn": "ZC=F",
+    "Soybeans": "ZS=F", "Wheat": "ZW=F", "Natural Gas": "NG=F", "Copper": "HG=F",
+}
 
 DEFAULT_MODEL_IDS = {
     "finbert": "snunlp/KR-FinBERT-SC",
     "elite": "nlptown/bert-base-multilingual-uncased-sentiment",
     "product": "cardiffnlp/twitter-xlm-roberta-base-sentiment"
 }
+
+# --- Guide Content ---
+guide_content = """
+### 1. 상관관계 분석 탭
+- **분석 방법 선택 (Pearson vs Spearman)**
+    - **`Pearson`**: 두 변수가 **'선형 관계'(정비례/반비례)**에 가까울 때 선택합니다. (예: 광고비와 매출)
+    - **`Spearman`**: **'순위 관계'(한쪽이 증가할 때 다른 쪽도 일관되게 증가/감소)**를 보고 싶을 때 선택합니다. 복잡한 비선형 관계도 잡아낼 수 있어 더 범용적입니다.
+- **P-value 필터**: 이 관계가 **'우연일 확률'**을 의미합니다. 통계적으로 의미 있는 관계를 찾기 위해 보통 **0.05 이하**로 설정합니다. (즉, 우연일 확률이 5% 미만인 관계만 보겠다는 의미)
+- **시차 분석 (선행/후행 변수)**
+    - **`선행 변수(Driver)`**: 원인이 될 수 있는 변수 그룹 (예: 뉴스 감성, 선물 가격)
+    - **`후행 변수(Outcome)`**: 결과적으로 영향을 받는 변수 그룹 (예: 수입량, 수입단가)
+    - **목적**: "국제 유가가 오르면, 몇 주 후에 수입 단가가 상승할까?" 와 같은 선후 관계를 분석하여 미래 예측의 단서를 찾습니다.
+- **산점도 행렬**: 여러 변수 간의 관계를 한눈에 시각적으로 파악할 수 있습니다. 점들이 우상향하면 양의 관계, 우하향하면 음의 관계를 의심해볼 수 있습니다.
+
+---
+
+### 2. 시계열 예측 탭
+#### **가. 예측 파라미터, 어떻게 설정해야 할까요?**
+- **`🤖 최적 파라미터 자동 탐색`**: 가장 먼저 눌러보세요! 데이터에 가장 적합한 파라미터 조합을 자동으로 찾아 슬라이더와 선택 박스를 설정해주는 기능입니다. 이 최적의 상태에서부터 미세 조정을 시작하는 것을 권장합니다.
+- **`Trend 유연성 (changepoint_prior_scale)`**
+    - **역할**: 데이터의 장기적인 추세(Trend)가 얼마나 급격하게 변하는지를 모델에게 알려주는 값입니다.
+    - **설정 가이드**:
+        - **낮은 값 (0.01 ~ 0.1)**: 안정적인 시장. 추세가 거의 변하지 않거나 완만하게 변할 때 사용합니다. (예: 쌀 가격)
+        - **높은 값 (0.1 ~ 0.5)**: 역동적인 시장. 신제품 출시, 정책 변화 등으로 추세가 자주, 크게 꺾일 때 사용합니다. (예: 유행성 패션 아이템)
+- **`계절성 강도 (seasonality_prior_scale)`**
+    - **역할**: 1년 주기, 1주일 주기 등 반복되는 패턴(계절성)을 얼마나 강하게 믿을지를 결정합니다.
+    - **설정 가이드**:
+        - **낮은 값 (0.1 ~ 1.0)**: 계절성이 약하거나 불규칙할 때 사용합니다.
+        - **높은 값 (1.0 ~ 10.0)**: 여름휴가, 연말 쇼핑 시즌처럼 매년 뚜렷한 패턴이 반복될 때 사용합니다.
+- **`계절성 모드 (seasonality_mode)`**
+    - **역할**: 계절성 패턴이 전체 추세에 어떻게 영향을 미치는지를 정의합니다.
+    - **`additive (덧셈 모드)`**: 계절성의 변동폭이 추세와 상관없이 **일정할 때** 사용합니다. (예: 매년 여름 매출이 약 '1천만 원'씩 증가)
+    - **`multiplicative (곱셈 모드)`**: 계절성의 변동폭이 추세에 따라 **함께 커지거나 작아질 때** 사용합니다. (예: 비즈니스가 성장함에 따라, 매년 여름 매출이 '10%'씩 증가)
+
+#### **나. Prophet 예측 결과, 어떻게 해석해야 할까요?**
+- **Prophet 예측 그래프**
+    - **정확도 판단 기준**: "예측선(파란선)이 과거의 실제 데이터(검은 점)의 전반적인 흐름을 잘 따라가는가?"가 1차적인 기준입니다. 특히, 최근 데이터의 패턴을 잘 맞추고 있는지 확인하는 것이 중요합니다. '불확실성 구간(하늘색 영역)'이 너무 넓지 않고, 실제 값들이 대부분 그 안에 있다면 신뢰할 만한 예측입니다.
+- **요인 분해 그래프**
+    - **`trend`**: 데이터의 장기적인 방향성입니다. 이 선이 우상향하면 장기적으로 사업이 성장하고 있음을, 우하향하면 축소되고 있음을 의미합니다.
+    - **`yearly` / `weekly`**: 해당 주기의 '순수한' 영향력을 보여줍니다. 예를 들어, `yearly` 그래프가 7월에 가장 높다면, 다른 모든 요인을 제외하고도 "7월"이라는 시점 자체가 예측값을 끌어올리는 효과가 있다는 뜻입니다.
+    - **`extra_regressors` (외부 예측 변수)**: 해당 외부 변수가 예측값에 미친 **'추가적인 영향력'**을 보여줍니다. 예를 들어, 선물 가격(regressor) 그래프가 양수(+) 값을 보이면, 그 시점의 높은 선물 가격이 최종 예측값을 끌어올리는 역할을 했다는 의미입니다.
+
+#### **다. 모델 진단: 내 예측 모델, 믿을만 한가요?**
+- **ADF Test**
+    - **정의**: 모델이 놓친 **"예측 오차(잔차)"에 여전히 유의미한 패턴이 남아있는지**를 검사하는 '패턴 탐지기'입니다.
+    - **안정성 판단**: P-value가 **`0.05` 미만**이면 "오차에 패턴이 남아있을 확률이 5% 미만이다", 즉 **"오차는 거의 무작위적이므로 모델이 안정적이다"**라고 결론 내립니다. 반대로 0.05 이상이면, 아직 모델이 학습하지 못한 패턴이 남아있어 개선이 필요하다는 신호입니다.
+
+#### **라. 최종 예측 (XGBoost): 더 깊은 인사이트 발견하기**
+- **`R² Score` (설명력 / 결정계수)**
+    - **의미**: 모델이 **"얼마나 미래를 잘 설명하는가?"**를 0~1 사이의 점수로 나타냅니다. 0.7 이라는 값은, 우리 모델이 미래 변동성의 70%를 설명할 수 있다는 뜻입니다.
+    - **의미 있는 수준**: 일반적으로 **0.6 이상**이면 준수한 모델, **0.8 이상**이면 매우 좋은 모델로 평가합니다. **음수(-)가 나오면, 단순히 평균값으로 예측하는 것보다도 성능이 나쁘다는 최악의 신호입니다.**
+- **`RMSE` (평균 오차)**
+    - **의미**: **"그래서 예측이 평균적으로 얼마나 틀렸는가?"**를 실제 단위로 보여줍니다. 낮을수록 좋은 모델입니다.
+"""
+
+# ----------------------------
+#  Helper Functions (Analysis & Interpretation)
+# ----------------------------
+@st.cache_data
+def calculate_advanced_correlation(df, method='pearson'):
+    df_numeric = df.select_dtypes(include=np.number).dropna(how='all', axis=1)
+    cols = df_numeric.columns
+    corr_matrix = pd.DataFrame(np.ones((len(cols), len(cols))), index=cols, columns=cols)
+    pval_matrix = pd.DataFrame(np.ones((len(cols), len(cols))), index=cols, columns=cols)
+    pvalues_list = []
+    for i in range(len(cols)):
+        for j in range(i + 1, len(cols)):
+            col1_data, col2_data = df_numeric[cols[i]].dropna(), df_numeric[cols[j]].dropna()
+            common_index = col1_data.index.intersection(col2_data.index)
+            if len(common_index) < 3: continue
+            col1_data, col2_data = col1_data.loc[common_index], col2_data.loc[common_index]
+            corr, pval = (pearsonr if method == 'pearson' else spearmanr)(col1_data, col2_data)
+            corr_matrix.iloc[i, j] = corr_matrix.iloc[j, i] = corr
+            pval_matrix.iloc[i, j] = pval_matrix.iloc[j, i] = pval
+            pvalues_list.append(pval)
+    if pvalues_list:
+        _, pvals_corrected, _, _ = multipletests(pvalues_list, alpha=0.05, method='fdr_bh')
+        k = 0
+        for i in range(len(cols)):
+            for j in range(i + 1, len(cols)):
+                pval_matrix.iloc[i, j] = pval_matrix.iloc[j, i] = pvals_corrected[k]; k += 1
+    return corr_matrix, pval_matrix
+
+@st.cache_data
+def find_best_lagged_correlation(df, driver_vars, outcome_vars, max_lag=12):
+    best_correlations = []
+    for driver in driver_vars:
+        for outcome in outcome_vars:
+            if driver == outcome: continue
+            max_corr_val, best_lag = 0, 0
+            for lag in range(-max_lag, max_lag + 1):
+                try:
+                    corr = df[driver].shift(lag).corr(df[outcome])
+                    if pd.notna(corr) and abs(corr) > abs(max_corr_val):
+                        max_corr_val, best_lag = corr, lag
+                except Exception: continue
+            if best_lag != 0:
+                best_correlations.append({'Driver (X)': driver, 'Outcome (Y)': outcome, 'Best Lag (Weeks)': best_lag, 'Correlation': max_corr_val})
+    if not best_correlations: return pd.DataFrame()
+    df_lags = pd.DataFrame(best_correlations)
+    df_lags['Abs Correlation'] = df_lags['Correlation'].abs()
+    return df_lags.sort_values('Abs Correlation', ascending=False).drop(columns=['Abs Correlation'])
+
+def interpret_correlation(corr_matrix, pval_matrix, threshold=0.05):
+    strong_corrs = []
+    driver_keywords = ['news', 'naver', 'sentiment', '가격', 'futures']
+    outcome_keywords = ['수입', 'volume']
+    driver_cols = [c for c in corr_matrix.columns if any(kw in c.lower() for kw in driver_keywords)]
+    outcome_cols = [c for c in corr_matrix.columns if any(kw in c.lower() for kw in outcome_keywords)]
+    for driver in driver_cols:
+        for outcome in outcome_cols:
+            if driver == outcome or outcome not in corr_matrix.index or driver not in corr_matrix.columns: continue
+            corr_val, pval = corr_matrix.loc[driver, outcome], pval_matrix.loc[driver, outcome]
+            if pval < threshold and abs(corr_val) >= 0.4:
+                direction = "양의" if corr_val > 0 else "음의"
+                interpretation = f"**'{driver}'**와(과) **'{outcome}'** 사이에는 통계적으로 유의미한 **{direction} 상관관계**가 있습니다 (상관계수: {corr_val:.2f}, p-value: {pval:.3f})."
+                strong_corrs.append({'text': interpretation, 'value': abs(corr_val)})
+    if not strong_corrs: return "Driver(감성, 검색량 등)와 Outcome(수입량, 금액 등) 변수 그룹 간에 통계적으로 의미 있는 강한 관계는 발견되지 않았습니다."
+    strong_corrs = sorted(strong_corrs, key=lambda x: x['value'], reverse=True)
+    summary = "### 주요 발견 (Driver vs Outcome):\n\n" + "\n".join([f"- {corr['text']}" for corr in strong_corrs[:5]])
+    summary += "\n\n* **양의 상관관계 (+):** Driver 변수가 증가할 때 Outcome 변수도 함께 증가하는 경향을 보입니다."
+    summary += "\n* **음의 상관관계 (-):** Driver 변수가 증가할 때 Outcome 변수는 오히려 감소하는 경향을 보입니다."
+    return summary
+
+# ----------------------------
+#  Helpers: Data Fetching & Processing
+# ----------------------------
 @st.cache_resource
-def load_models(model_ids, token):
+def get_bq_connection():
+    try:
+        creds_dict = st.secrets["gcp_service_account"]
+        creds = service_account.Credentials.from_service_account_info(creds_dict)
+        return bigquery.Client(credentials=creds, project=creds.project_id)
+    except Exception as e:
+        st.error(f"Google BigQuery 연결 실패: {e}"); return None
+
+def upload_df_to_bq(client, df, table_id):
+    try:
+        pandas_gbq.to_gbq(df, f"{BQ_DATASET}.{table_id}", project_id=client.project, if_exists="append", credentials=client._credentials)
+        return True, None
+    except Exception as e: return False, str(e)
+
+@st.cache_resource
+def load_models(_model_ids, token):
     models = {}
-    for key, mid in model_ids.items():
+    for key, mid in _model_ids.items():
         try:
             models[key] = pipeline("sentiment-analysis", model=mid, tokenizer=mid, token=token)
-        except Exception:
-            models[key] = None
+        except Exception: models[key] = None
     return models
-models = load_models(DEFAULT_MODEL_IDS, hf_token)
-
-# ----------------------------
-#  감성분석 점수 변환 함수
-# ----------------------------
-def _label_score_to_signed(pred):
-    if not pred: return 0.0, "neutral"
-    lbl, score = str(pred.get("label", "")).lower(), float(pred.get("score", 0.0))
-    if "star" in lbl:
-        try:
-            n = int(lbl.split()[0])
-            return (n - 3) / 2.0, "positive" if n > 3 else "negative" if n < 3 else "neutral"
-        except (ValueError, IndexError):
-            return 0.0, "neutral"
-    if any(x in lbl for x in ["neg", "negative", "부정"]): return -score, "negative"
-    if any(x in lbl for x in ["pos", "positive", "긍정"]): return score, "positive"
-    return 0.0, "neutral"
-
-def analyze_sentiment_multi(texts, _models_dict):
-    results = []
-    if not texts: return results
-    
-    preds = {key: (model(texts, truncation=True, max_length=512) if model else [None]*len(texts)) for key, model in _models_dict.items()}
-        
-    for i, _ in enumerate(texts):
-        fin_s, fin_l = _label_score_to_signed(preds.get("finbert", [])[i] if preds.get("finbert") else None)
-        el_s, el_l = _label_score_to_signed(preds.get("elite", [])[i] if preds.get("elite") else None)
-        pr_s, pr_l = _label_score_to_signed(preds.get("product", [])[i] if preds.get("product") else None)
-        results.append({
-            "FinBERT_Sentiment": fin_s, "FinBERT_Label": fin_l,
-            "Elite_Sentiment": el_s, "Elite_Label": el_l,
-            "Product_Sentiment": pr_s, "Product_Label": pr_l,
-            "Sentiment": fin_s, "Label": fin_l
-        })
-    return results
-# ----------------------------
-#  뉴스 수집/분석
-# ----------------------------
-def _fetch_article_text(url):
-    if not _HAS_NEWSPAPER or not url: return ""
-    try:
-        cfg = NewsConfig()
-        cfg.browser_user_agent = "Mozilla/5.0 (compatible; NewsBot/1.0)"
-        cfg.request_timeout = 10
-        art = Article(url, language='ko', config=cfg)
-        art.download()
-        art.parse()
-        return art.text or ""
-    except Exception:
-        return ""
 
 @st.cache_data(ttl=3600)
-def get_news_with_multi_model_analysis(_bq_client, _models_dict, keyword, days_limit=7):
-    project_id = _bq_client.project
-    full_table_id = f"{project_id}.{BQ_DATASET}.{BQ_TABLE_NEWS}"
-    try:
-        time_limit = datetime.now(timezone.utc) - timedelta(days=days_limit)
-        query = "SELECT * FROM `{}` WHERE Keyword = @keyword AND InsertedAt >= @time_limit ORDER BY 날짜 DESC".format(full_table_id)
-        job_config = bigquery.QueryJobConfig(query_parameters=[
-            bigquery.ScalarQueryParameter("keyword", "STRING", keyword),
-            bigquery.ScalarQueryParameter("time_limit", "TIMESTAMP", time_limit)
-        ])
-        df_cache = _bq_client.query(query, job_config=job_config).to_dataframe()
-    except Exception:
-        df_cache = pd.DataFrame()
-    if not df_cache.empty:
-        return df_cache
+def get_news_with_multi_model_analysis(_bq_client, _models_dict, keyword):
     all_news = []
     rss_url = f"https://news.google.com/rss/search?q={quote(keyword)}&hl=ko&gl=KR&ceid=KR:ko"
     feed = feedparser.parse(rss_url)
-    for entry in feed.entries[:60]:
+    for entry in feed.entries[:50]:
         title = entry.get('title', '').strip()
-        link = entry.get('link', '').strip()
         if not title: continue
         pub_date = pd.to_datetime(entry.get('published')).date() if 'published' in entry else datetime.utcnow().date()
-        body = _fetch_article_text(link)
-        text_for_model = (title + ". " + body).strip() if body else title
-        all_news.append({"날짜": pub_date, "Title": title, "RawUrl": link, "ModelInput": text_for_model})
-    if not all_news:
-        st.error(f"'{keyword}'에 대한 뉴스를 찾지 못했습니다.")
-        return pd.DataFrame()
-    df_new = pd.DataFrame(all_news).drop_duplicates(subset=["Title"])
-    with st.spinner(f"다중 모델로 '{keyword}' 뉴스 감성 분석 중 ({len(df_new)}건)..."):
-        multi = analyze_sentiment_multi(df_new['ModelInput'].tolist(), _models_dict)
-    multi_df = pd.DataFrame(multi)
-    df_new = pd.concat([df_new.reset_index(drop=True), multi_df], axis=1)
-    df_new['Keyword'] = keyword
-    df_new['InsertedAt'] = datetime.now(timezone.utc)
-    try:
-        df_to_gbq = df_new.drop(columns=['ModelInput'])
-        upload_df_to_bq(_bq_client, df_to_gbq, BQ_TABLE_NEWS)
-    except Exception as e:
-        st.sidebar.warning(f"BigQuery 뉴스 저장 실패: {e}")
-    return df_new.drop(columns=['ModelInput'])
+        all_news.append({"날짜": pub_date, "Title": title, "ModelInput": title})
+    if not all_news: return pd.DataFrame()
+    df_new = pd.DataFrame(all_news).drop_duplicates(subset=["ModelInput"])
+    with st.spinner(f"'{keyword}' 뉴스 감성 분석 중..."):
+        def _label_score_to_signed(pred):
+            if not pred: return 0.0
+            lbl, score = str(pred.get("label", "")).lower(), float(pred.get("score", 0.0))
+            if "star" in lbl:
+                try: n = int(lbl.split()[0]); return (n - 3) / 2.0
+                except (ValueError, IndexError): return 0.0
+            if any(x in lbl for x in ["neg", "negative", "부정"]): return -score
+            if any(x in lbl for x in ["pos", "positive", "긍정"]): return score
+            return 0.0
+        preds = {key: (model(df_new['ModelInput'].tolist(), truncation=True, max_length=512) if model else [None]*len(df_new)) for key, model in _models_dict.items()}
+        multi = []
+        for i in range(len(df_new)):
+            multi.append({
+                "News_FinBERT": _label_score_to_signed(preds.get("finbert", [])[i]),
+                "News_Elite": _label_score_to_signed(preds.get("elite", [])[i]),
+                "News_Product": _label_score_to_signed(preds.get("product", [])[i])
+            })
+    return pd.concat([df_new.reset_index(drop=True), pd.DataFrame(multi)], axis=1).drop(columns=['ModelInput'])
 
-# ----------------------------
-#  BigQuery 데이터 로드 함수들
-# ----------------------------
 @st.cache_data(ttl=3600)
 def get_categories_from_bq(_client):
     try:
@@ -425,89 +257,82 @@ def get_trade_data_from_bq(client, categories):
         job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ArrayQueryParameter("categories", "STRING", categories)])
         df = client.query(sql, job_config=job_config).to_dataframe()
         df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-        for col in [c for c in df.columns if 'price' in c.lower() or 'value' in c.lower() or 'volume' in c.lower()]:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
         return df
-    except Exception as e:
-        st.error(f"BigQuery TDS 데이터 로드 오류: {e}")
-        return pd.DataFrame()
+    except Exception as e: st.error(f"BigQuery TDS 데이터 로드 오류: {e}"); return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
-def fetch_naver_trends_data(_client, keywords, start_date, end_date, naver_keys):
-    project_id = _client.project
-    table_id = f"{project_id}.{BQ_DATASET}.{BQ_TABLE_NAVER}"
+def fetch_yfinance_data(ticker_name, ticker_symbol, start_date, end_date):
     try:
-        sql = f"SELECT * FROM `{table_id}` ORDER BY 날짜"
-        df_cache = _client.query(sql).to_dataframe()
-        if not df_cache.empty:
-            df_cache['날짜'] = pd.to_datetime(df_cache['날짜'])
-    except Exception:
-        df_cache = pd.DataFrame(columns=['날짜'])
+        data = yf.download(ticker_symbol, start=start_date, end=end_date, progress=False)
+        if data.empty: return pd.DataFrame()
+        df = data[['Close']].rename(columns={'Close': f'Futures_{ticker_name}'})
+        df.index.name = '날짜'
+        return df
+    except Exception as e: st.sidebar.error(f"Yahoo Finance 데이터 로드 중 오류: {e}"); return pd.DataFrame()
 
-    fetch_start_date = start_date
-    if not df_cache.empty:
-        last_cached_date = df_cache['날짜'].max().date()
-        if start_date.date() > last_cached_date:
-            fetch_start_date = start_date
-        elif end_date.date() > last_cached_date:
-            fetch_start_date = pd.Timestamp(last_cached_date) + timedelta(days=1)
-        else:
-            return df_cache[(df_cache['날짜'] >= pd.to_datetime(start_date)) & (df_cache['날짜'] <= pd.to_datetime(end_date))].reset_index(drop=True)
+@st.cache_data(ttl=3600)
+def fetch_kamis_data(item_info, start_date, end_date, kamis_keys):
+    start_str, end_str = start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')
+    url = (f"http://www.kamis.or.kr/service/price/xml.do?action=periodWholesaleProductList"
+           f"&p_product_cls_code=01&p_startday={start_str}&p_endday={end_str}"
+           f"&p_item_category_code={item_info['cat_code']}&p_item_code={item_info['item_code']}&p_kind_code={item_info['kind_code']}"
+           f"&p_product_rank_code={item_info['rank_code']}&p_convert_kg_yn=Y"
+           f"&p_cert_key={kamis_keys['key']}&p_cert_id={kamis_keys['id']}&p_returntype=json")
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200 and "data" in response.json():
+            price_data = response.json().get("data", {}).get("item", [])
+            if not price_data: return pd.DataFrame()
+            df_new = pd.DataFrame(price_data)[['regday', 'price']].rename(columns={'regday': '날짜', 'price': '도매가격_원'})
+            df_new['날짜'] = pd.to_datetime(df_new['날짜'].str.replace('/', '-'))
+            df_new['도매가격_원'] = pd.to_numeric(df_new['도매가격_원'].str.replace(',', ''))
+            return df_new
+    except Exception: return pd.DataFrame()
 
-    new_data_list = []
-    if fetch_start_date <= end_date:
-        current_start = fetch_start_date
-        while current_start <= end_date:
-            current_end = min(current_start + timedelta(days=89), end_date)
-            all_data_chunk = []
-            for keyword in keywords:
-                body_search = json.dumps({
-                    "startDate": current_start.strftime('%Y-%m-%d'),
-                    "endDate": current_end.strftime('%Y-%m-%d'),
-                    "timeUnit": "date",
-                    "keywordGroups": [{"groupName": keyword, "keywords": [keyword]}]
-                })
-                search_res = call_naver_api("https://openapi.naver.com/v1/datalab/search", body_search, naver_keys)
-                if search_res and search_res.get('results') and search_res['results'][0]['data']:
-                    df_search = pd.DataFrame(search_res['results'][0]['data'])
-                    if not df_search.empty:
-                         df_search.rename(columns={'period': '날짜', 'ratio': f'Naver_{keyword}'}, inplace=True)
-                         all_data_chunk.append(df_search)
-            if all_data_chunk:
-                merged_chunk = reduce(lambda l, r: pd.merge(l, r, on='날짜', how='outer'), all_data_chunk)
-                new_data_list.append(merged_chunk)
-            current_start = current_end + timedelta(days=1)
-    if new_data_list:
-        df_new = pd.concat(new_data_list, ignore_index=True)
-        df_new['날짜'] = pd.to_datetime(df_new['날짜'])
-        if not df_cache.empty:
-            df_combined = pd.concat([df_cache, df_new], ignore_index=True).sort_values('날짜').drop_duplicates(subset=['날짜'], keep='last')
-        else:
-            df_combined = df_new.sort_values('날짜')
+@st.cache_data(ttl=3600)
+def fetch_naver_trends_data(keywords, start_date, end_date, naver_keys):
+    st.sidebar.warning("Naver API 연동은 현재 비활성화 상태입니다. (Placeholder)")
+    return pd.DataFrame()
+
+
+@st.cache_data
+def find_best_prophet_params(_df, _regressors):
+    param_grid = {
+        'changepoint_prior_scale': [0.01, 0.05, 0.1, 0.5],
+        'seasonality_prior_scale': [0.1, 1.0, 10.0],
+        'seasonality_mode': ['additive', 'multiplicative'],
+    }
+    all_params = [dict(zip(param_grid.keys(), v)) for v in itertools.product(*param_grid.values())]
+    rmses = []
+    initial_days = str(int(len(_df) * 0.5)) + ' days'
+    period_days = str(int(len(_df) * 0.2)) + ' days'
+    horizon_days = str(int(len(_df) * 0.2)) + ' days'
+    if int(len(_df) * 0.2) < 30 : return all_params[1]
+
+    for params in all_params:
         try:
-            pandas_gbq.to_gbq(df_combined, f"{BQ_DATASET}.{BQ_TABLE_NAVER}", project_id=project_id, if_exists="replace", credentials=_client._credentials)
-        except Exception as e:
-            st.warning(f"Naver 트렌드 캐시 업데이트 실패: {e}")
-        df_final = df_combined
-    else:
-        df_final = df_cache
-    if df_final.empty:
-        return pd.DataFrame()
-    return df_final[(df_final['날짜'] >= pd.to_datetime(start_date)) & (df_final['날짜'] <= pd.to_datetime(end_date))].reset_index(drop=True)
+            m = Prophet(**params)
+            for reg in _regressors: m.add_regressor(reg)
+            m.fit(_df)
+            df_cv = cross_validation(m, initial=initial_days, period=period_days, horizon=horizon_days, parallel="processes")
+            df_p = performance_metrics(df_cv, rolling_window=1)
+            rmses.append(df_p['rmse'].values[0])
+        except Exception:
+            rmses.append(float('inf'))
+    best_params = all_params[np.argmin(rmses)]
+    return best_params
 
-# Initialize BQ Client and session state
+# ----------------------------
+#  App Main Logic
+# ----------------------------
 bq_client = get_bq_connection()
 if bq_client is None: st.stop()
 hf_token = st.secrets.get("huggingface", {}).get("token")
 models = load_models(DEFAULT_MODEL_IDS, hf_token)
 if 'final_df' not in st.session_state: st.session_state.final_df = pd.DataFrame()
 if 'raw_news_df' not in st.session_state: st.session_state.raw_news_df = pd.DataFrame()
-if 'best_params' not in st.session_state: st.session_state.best_params = None
+if 'best_params' not in st.session_state: st.session_state.best_params = {}
 
-
-# ----------------------------
-#  Sidebar: UI & Data Loading
-# ----------------------------
 st.sidebar.header("⚙️ 분석 설정")
 categories = get_categories_from_bq(bq_client)
 selected_categories = st.sidebar.multiselect("분석할 품목 선택", categories, default=categories[:1] if categories else [])
@@ -564,98 +389,6 @@ if st.sidebar.button("🚀 모든 데이터 통합 및 분석 실행"):
         st.session_state.best_params = {}
         st.success("데이터 통합 완료!")
 
-# --- CSV/Excel Upload Section ---
-st.sidebar.markdown("---")
-st.sidebar.subheader("품목 데이터 파일 업로드")
-uploaded_file = st.sidebar.file_uploader("CSV 또는 Excel 파일을 업로드하세요.", type=['csv', 'xlsx'], help="필수 컬럼: Date, Value, Volume")
-new_category_name = st.sidebar.text_input("업로드할 데이터의 품목명을 입력하세요.", help="예: 아보카도, 바나나 등")
-if st.sidebar.button("파일을 BigQuery에 업로드"):
-    if uploaded_file and new_category_name.strip():
-        with st.spinner("파일 처리 및 업로드 중..."):
-            try:
-                df_upload = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file, engine='openpyxl')
-                df_upload.columns = [c.lower() for c in df_upload.columns]
-                required_cols = {'date', 'value', 'volume'}
-                if not required_cols.issubset(df_upload.columns):
-                    st.sidebar.error("파일에 필수 컬럼('Date', 'Value', 'Volume')이 없습니다.")
-                else:
-                    df_upload = df_upload.rename(columns={'date': 'Date', 'value': 'Value', 'volume': 'Volume'})
-                    df_upload['Date'] = pd.to_datetime(df_upload['Date'], errors='coerce')
-                    df_upload['Value'] = pd.to_numeric(df_upload['Value'], errors='coerce')
-                    df_upload['Volume'] = pd.to_numeric(df_upload['Volume'], errors='coerce')
-                    df_upload['Category'] = new_category_name.strip()
-                    df_to_bq = df_upload[['Date', 'Category', 'Value', 'Volume']].dropna()
-                    success, error_msg = upload_df_to_bq(bq_client, df_to_bq, BQ_TABLE_TRADE)
-                    if success:
-                        st.sidebar.success(f"'{new_category_name}' 데이터 {len(df_to_bq)}건을 성공적으로 업로드했습니다!")
-                        st.cache_data.clear()
-                    else:
-                        st.sidebar.error(f"업로드 실패: {error_msg}")
-            except Exception as e:
-                st.sidebar.error(f"파일 처리 오류: {e}")
-    else:
-        st.sidebar.warning("파일을 업로드하고 품목명을 입력해주세요.")
-
-# ----------------------------
-# --- Guide Content ---
-guide_content = """
-### 1. 상관관계 분석 탭
-- **분석 방법 선택 (Pearson vs Spearman)**
-    - **`Pearson`**: 두 변수가 **'선형 관계'(정비례/반비례)**에 가까울 때 선택합니다. (예: 광고비와 매출)
-    - **`Spearman`**: **'순위 관계'(한쪽이 증가할 때 다른 쪽도 일관되게 증가/감소)**를 보고 싶을 때 선택합니다. 복잡한 비선형 관계도 잡아낼 수 있어 더 범용적입니다.
-- **P-value 필터**: 이 관계가 **'우연일 확률'**을 의미합니다. 통계적으로 의미 있는 관계를 찾기 위해 보통 **0.05 이하**로 설정합니다. (즉, 우연일 확률이 5% 미만인 관계만 보겠다는 의미)
-- **시차 분석 (선행/후행 변수)**
-    - **`선행 변수(Driver)`**: 원인이 될 수 있는 변수 그룹 (예: 뉴스 감성, 검색량)
-    - **`후행 변수(Outcome)`**: 결과적으로 영향을 받는 변수 그룹 (예: 수입량, 수입단가)
-    - **목적**: "뉴스 기사가 긍정적이면, 몇 주 후에 수입량이 늘어날까?" 와 같은 선후 관계를 분석하여 미래 예측의 단서를 찾습니다.
-- **산점도 행렬**: 여러 변수 간의 관계를 한눈에 시각적으로 파악할 수 있습니다. 점들이 우상향하면 양의 관계, 우하향하면 음의 관계를 의심해볼 수 있습니다.
-
----
-
-### 2. 시계열 예측 탭
-#### **가. 예측 파라미터, 어떻게 설정해야 할까요?**
-- **`Trend 유연성 (changepoint_prior_scale)`**
-    - **역할**: 데이터의 장기적인 추세(Trend)가 얼마나 급격하게 변하는지를 모델에게 알려주는 값입니다.
-    - **설정 가이드**:
-        - **낮은 값 (0.01 ~ 0.1)**: 안정적인 시장. 추세가 거의 변하지 않거나 완만하게 변할 때 사용합니다. (예: 쌀 가격)
-        - **높은 값 (0.1 ~ 0.5)**: 역동적인 시장. 신제품 출시, 정책 변화 등으로 추세가 자주, 크게 꺾일 때 사용합니다. (예: 유행성 패션 아이템)
-    - **왜 0.5까지인가?**: 0.5 이상은 과적합(Overfitting) 위험이 커집니다. 모델이 실제 추세가 아닌 사소한 노이즈까지 추세 변화로 착각하여 미래 예측을 망칠 수 있기 때문에, 0.5를 상한선으로 설정했습니다.
-- **`계절성 강도 (seasonality_prior_scale)`**
-    - **역할**: 1년 주기, 1주일 주기 등 반복되는 패턴(계절성)을 얼마나 강하게 믿을지를 결정합니다.
-    - **설정 가이드**:
-        - **낮은 값 (0.1 ~ 1.0)**: 계절성이 약하거나 불규칙할 때 사용합니다.
-        - **높은 값 (1.0 ~ 10.0)**: 여름휴가, 연말 쇼핑 시즌처럼 매년 뚜렷한 패턴이 반복될 때 사용합니다.
-- **`계절성 모드 (seasonality_mode)`**
-    - **역할**: 계절성 패턴이 전체 추세에 어떻게 영향을 미치는지를 정의합니다.
-    - **`additive (덧셈 모드)`**: 계절성의 변동폭이 추세와 상관없이 **일정할 때** 사용합니다. (예: 매년 여름 매출이 약 '1천만 원'씩 증가)
-    - **`multiplicative (곱셈 모드)`**: 계절성의 변동폭이 추세에 따라 **함께 커지거나 작아질 때** 사용합니다. (예: 비즈니스가 성장함에 따라, 매년 여름 매출이 '10%'씩 증가)
-
-#### **나. Prophet 예측 결과, 어떻게 해석해야 할까요?**
-- **Prophet 예측 그래프**
-    - **정확도 판단 기준**: "예측선(파란선)이 과거의 실제 데이터(검은 점)의 전반적인 흐름을 잘 따라가는가?"가 1차적인 기준입니다. 특히, 최근 데이터의 패턴을 잘 맞추고 있는지 확인하는 것이 중요합니다. '불확실성 구간(하늘색 영역)'이 너무 넓지 않고, 실제 값들이 대부분 그 안에 있다면 신뢰할 만한 예측입니다.
-- **요인 분해 그래프**
-    - **`trend`**: 데이터의 장기적인 방향성입니다. 이 선이 우상향하면 장기적으로 사업이 성장하고 있음을, 우하향하면 축소되고 있음을 의미합니다.
-    - **`yearly` / `weekly`**: 해당 주기의 '순수한' 영향력을 보여줍니다. 예를 들어, `yearly` 그래프가 7월에 가장 높다면, 다른 모든 요인을 제외하고도 "7월"이라는 시점 자체가 예측값을 끌어올리는 효과가 있다는 뜻입니다.
-    - **`extra_regressors` (외부 예측 변수)**: 해당 외부 변수가 예측값에 미친 **'추가적인 영향력'**을 보여줍니다. 예를 들어, 뉴스 감성 점수(regressor) 그래프가 양수(+) 값을 보이면, 그 시점의 긍정적인 뉴스가 최종 예측값을 끌어올리는 역할을 했다는 의미입니다.
-
-#### **다. 모델 진단: 내 예측 모델, 믿을만 한가요?**
-- **ADF Test**
-    - **정의**: 모델이 놓친 **"예측 오차(잔차)"에 여전히 유의미한 패턴이 남아있는지**를 검사하는 '패턴 탐지기'입니다.
-    - **결론 도출 원리**: 통계적 가설 검정 기법으로, "오차에 패턴이 남아있다"는 가설이 얼마나 맞는지 확률(p-value)로 계산합니다.
-    - **안정성 판단**: P-value가 **`0.05` 미만**이면 "오차에 패턴이 남아있을 확률이 5% 미만이다", 즉 **"오차는 거의 무작위적이므로 모델이 안정적이다"**라고 결론 내립니다. 반대로 0.05 이상이면, 아직 모델이 학습하지 못한 패턴이 남아있어 개선이 필요하다는 신호입니다.
-
-#### **라. 최종 예측 (XGBoost): 더 깊은 인사이트 발견하기**
-- **`R² Score` (설명력 / 결정계수)**
-    - **의미**: 모델이 **"얼마나 미래를 잘 설명하는가?"**를 0~1 사이의 점수로 나타냅니다. 0.7 이라는 값은, 우리 모델이 미래 변동성의 70%를 설명할 수 있다는 뜻입니다.
-    - **의미 있는 수준**: 일반적으로 **0.6 이상**이면 준수한 모델, **0.8 이상**이면 매우 좋은 모델로 평가합니다. 하지만 데이터의 난이도에 따라 기준은 달라질 수 있습니다. **음수(-)가 나오면, 단순히 평균값으로 예측하는 것보다도 성능이 나쁘다는 최악의 신호입니다.**
-- **`RMSE` (평균 오차)**
-    - **의미**: **"그래서 예측이 평균적으로 얼마나 틀렸는가?"**를 실제 단위로 보여줍니다. 만약 예측 대상이 '수입 단가(USD)'이고 RMSE가 0.2라면, 예측값이 평균 0.2달러 정도 틀렸다는 의미입니다.
-    - **의미 있는 수준**: 이 값은 예측 대상의 평균값과 비교해야 의미가 있습니다. (예: 평균 단가가 2달러인데 RMSE가 0.2이면 오차율 10%) 낮을수록 좋은 모델입니다.
-"""
-
-# ----------------------------
-#  Main Dashboard Tabs
-# ----------------------------
 if not st.session_state.final_df.empty:
     final_df = st.session_state.final_df
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 상관관계 분석", "📈 시계열 예측", "📄 통합 데이터", "📰 수집 뉴스 원본", "📘 대시보드 사용법"])
@@ -663,83 +396,112 @@ if not st.session_state.final_df.empty:
     with tab1:
         st.header("상관관계 분석")
         col1, col2 = st.columns(2)
-        corr_method = col1.selectbox("상관관계 분석 방법", ('pearson', 'spearman'), help="피어슨: 선형, 스피어만: 비선형 관계")
-        pval_threshold = col2.slider("유의수준(P-value) 필터", 0.0, 1.0, 0.05)
+        corr_method = col1.selectbox("상관관계 분석 방법", ('pearson', 'spearman'), key="corr_method")
+        pval_threshold = col2.slider("유의수준 (P-value) 필터", 0.0, 1.0, 0.05, key="pval_slider")
         corr_matrix, pval_matrix = calculate_advanced_correlation(final_df, method=corr_method)
+        
         st.subheader(f"'{corr_method.capitalize()}' 상관관계 히트맵")
         fig_heatmap = go.Figure(data=go.Heatmap(z=corr_matrix.values, x=corr_matrix.columns, y=corr_matrix.columns, colorscale='RdBu_r', zmin=-1, zmax=1, text=corr_matrix.round(2).astype(str), texttemplate="%{text}"))
         st.plotly_chart(fig_heatmap, use_container_width=True)
-        with st.expander("🔍 히트맵 결과 해석하기 (Driver vs Outcome)"):
-            st.markdown(interpret_correlation_groups(corr_matrix, pval_matrix, threshold=pval_threshold))
+        
+        with st.expander("🔍 히트맵 결과 해석하기"):
+            st.markdown(interpret_correlation(corr_matrix, pval_matrix, threshold=pval_threshold))
+        
         st.markdown("---")
         st.subheader("시차 교차상관 분석")
-        driver_cols = st.multiselect("선행 변수(Driver) 선택", final_df.columns, default=[c for c in final_df if any(k in c for k in ['News', 'Naver', '도매'])])
-        outcome_cols = st.multiselect("후행 변수(Outcome) 선택", final_df.columns, default=[c for c in final_df if '수입' in c])
+        driver_cols = st.multiselect("선행 변수 (Driver)", final_df.columns, default=[c for c in final_df if any(kw in c.lower() for kw in ['news', 'naver', '가격', 'futures'])])
+        outcome_cols = st.multiselect("후행 변수 (Outcome)", final_df.columns, default=[c for c in final_df if '수입' in c])
         if driver_cols and outcome_cols:
             lag_df = find_best_lagged_correlation(final_df, driver_cols, outcome_cols)
             st.dataframe(lag_df.head(10))
             if not lag_df.empty:
-                top_lag = lag_df.iloc[0]
-                with st.expander("🔍 시차 분석 결과 해석하기"):
-                    st.info(f"가장 강한 시차 관계: **{top_lag['Driver (X)']}**의 변화는 **{top_lag['Best Lag (Weeks)']}주 후** **{top_lag['Outcome (Y)']}**에 영향을 미치는 경향이 있습니다 (상관계수: {top_lag['Correlation']:.3f}).")
+                st.info(f"가장 강한 시차 관계: **{lag_df.iloc[0]['Driver (X)']}**의 변화는 **{lag_df.iloc[0]['Best Lag (Weeks)']}주 후** **{lag_df.iloc[0]['Outcome (Y)']}**에 영향을 미치는 경향이 있습니다 (상관계수: {lag_df.iloc[0]['Correlation']:.3f}).")
+        
+        st.markdown("---")
+        st.subheader("산점도 행렬 (Scaled for Visualization)")
+        scaler = MinMaxScaler()
+        scaled_df = pd.DataFrame(scaler.fit_transform(final_df), columns=final_df.columns, index=final_df.index)
+        dims = st.multiselect("산점도 표시 변수", scaled_df.columns, default=list(scaled_df.columns[:8]))
+        if dims:
+            st.plotly_chart(px.scatter_matrix(scaled_df[dims]), use_container_width=True)
+
     with tab2:
         st.header("시계열 예측 (Prophet & XGBoost)")
         prophet_df = final_df.reset_index().rename(columns={final_df.index.name if final_df.index.name else 'index': 'ds'})
-        col1, col2 = st.columns(2); forecast_col = col1.selectbox("예측 대상 변수 (y)", final_df.columns); forecast_periods = col2.number_input("예측 기간 (주)", 4, 52, 12)
+        col1, col2 = st.columns(2)
+        forecast_col = col1.selectbox("예측 대상 변수 (y)", final_df.columns, key="forecast_col")
+        forecast_periods = col2.number_input("예측 기간 (주)", 4, 52, 12, key="forecast_periods")
         prophet_df = prophet_df.rename(columns={forecast_col: 'y'})
         regressors = [c for c in prophet_df.columns if c not in ['ds', 'y']]
-        selected_regressors = st.multiselect("외부 예측 변수 (Regressors)", regressors, default=regressors)
+        selected_regressors = st.multiselect("외부 예측 변수 (Regressors)", regressors, default=regressors, key="regressors")
         
         st.subheader("Prophet 모델 파라미터 튜닝")
         if st.button("🤖 최적 파라미터 자동 탐색"):
-            with st.spinner("교차 검증을 통해 최적의 파라미터를 탐색 중입니다... (10~30초 소요)"):
+            with st.spinner("교차 검증을 통해 최적의 파라미터를 탐색 중입니다... (데이터 양에 따라 1~2분 소요될 수 있습니다)"):
                 best_params = find_best_prophet_params(prophet_df[['ds', 'y'] + selected_regressors], selected_regressors)
                 st.session_state.best_params = best_params
                 st.success("최적 파라미터 탐색 완료!")
-
-        # Set default values for sliders and selectbox
-        bp = st.session_state.best_params if st.session_state.best_params else {}
+        
+        bp = st.session_state.best_params
         p_col1, p_col2, p_col3 = st.columns(3)
-        changepoint_prior_scale = p_col1.slider("Trend 유연성", 0.01, 0.5, bp.get('changepoint_prior_scale', 0.05))
-        seasonality_prior_scale = p_col2.slider("계절성 강도", 0.01, 10.0, bp.get('seasonality_prior_scale', 1.0))
+        changepoint_prior_scale = p_col1.slider("Trend 유연성", 0.01, 0.5, bp.get('changepoint_prior_scale', 0.05), key="cps")
+        seasonality_prior_scale = p_col2.slider("계절성 강도", 0.01, 10.0, bp.get('seasonality_prior_scale', 1.0), key="sps")
         seasonality_mode_options = ['additive', 'multiplicative']
-        seasonality_mode = p_col3.selectbox("계절성 모드", seasonality_mode_options, index=seasonality_mode_options.index(bp.get('seasonality_mode', 'additive')))
-
+        seasonality_mode_index = seasonality_mode_options.index(bp.get('seasonality_mode', 'additive'))
+        seasonality_mode = p_col3.selectbox("계절성 모드", seasonality_mode_options, index=seasonality_mode_index, key="sm")
+        
         if st.button("🚀 예측 실행", key="run_forecast"):
-            # Forecasting logic is the same...
             m = Prophet(changepoint_prior_scale=changepoint_prior_scale, seasonality_prior_scale=seasonality_prior_scale, seasonality_mode=seasonality_mode)
             for reg in selected_regressors: m.add_regressor(reg)
             m.fit(prophet_df[['ds', 'y'] + selected_regressors])
             future = m.make_future_dataframe(periods=forecast_periods, freq='W')
-            future_regressors = prophet_df[['ds'] + selected_regressors].set_index('ds'); last_values = future_regressors.iloc[-1]; future_regressors = future_regressors.reindex(future['ds']).fillna(method='ffill').fillna(last_values); future = pd.concat([future.set_index('ds'), future_regressors], axis=1).reset_index()
+            future_regressors = prophet_df[['ds'] + selected_regressors].set_index('ds')
+            last_values = future_regressors.iloc[-1]
+            future_regressors = future_regressors.reindex(future['ds']).fillna(method='ffill').fillna(last_values)
+            future = pd.concat([future.set_index('ds'), future_regressors], axis=1).reset_index()
             forecast = m.predict(future)
-            st.subheader("Prophet 예측 결과"); st.plotly_chart(plot_plotly(m, forecast), use_container_width=True)
-            st.subheader("Prophet 요인 분해"); st.plotly_chart(plot_components_plotly(m, forecast), use_container_width=True)
-            st.markdown("---"); st.subheader("모델 진단: 잔차 분석")
+            st.subheader("Prophet 예측 결과")
+            st.plotly_chart(plot_plotly(m, forecast), use_container_width=True)
+            st.subheader("Prophet 요인 분해")
+            st.plotly_chart(plot_components_plotly(m, forecast), use_container_width=True)
+            st.markdown("---")
+            st.subheader("모델 진단: 잔차 분석")
             df_pred = forecast.set_index('ds')[['yhat']].join(prophet_df.set_index('ds')[['y']]).dropna()
             residuals = df_pred['y'] - df_pred['yhat']
             diag_col1, diag_col2 = st.columns(2)
             with diag_col1:
-                st.markdown("**잔차 정상성 검정 (ADF Test)**"); adf_result = adfuller(residuals); st.write(f"p-value: {adf_result[1]:.4f}")
-                with st.expander("🔍 ADF 테스트 결과 해석"): st.markdown(guide_content.split("ADF Test")[1].split("####")[0])
-            with diag_col2: st.markdown("**잔차 분포**"); st.plotly_chart(ff.create_distplot([residuals], ['residuals'], bin_size=.2, show_rug=False), use_container_width=True)
-            st.markdown("---"); st.subheader("고급 예측: XGBoost Meta-Forecasting")
-            ml_df = forecast[['ds', 'trend']].set_index('ds'); available_seasonal_components = []
+                st.markdown("**잔차 정상성 검정 (ADF Test)**")
+                adf_result = adfuller(residuals)
+                st.write(f"p-value: {adf_result[1]:.4f}")
+            with diag_col2:
+                st.markdown("**잔차 분포**")
+                st.plotly_chart(ff.create_distplot([residuals], ['residuals'], bin_size=.2, show_rug=False), use_container_width=True)
+            st.markdown("---")
+            st.subheader("고급 예측: XGBoost Meta-Forecasting")
+            ml_df = forecast[['ds', 'trend']].set_index('ds')
+            available_seasonal_components = []
             if 'yearly' in forecast.columns: ml_df = ml_df.join(forecast[['ds', 'yearly']].set_index('ds')); available_seasonal_components.append('yearly')
             if 'weekly' in forecast.columns: ml_df = ml_df.join(forecast[['ds', 'weekly']].set_index('ds')); available_seasonal_components.append('weekly')
             ml_df = ml_df.join(prophet_df.set_index('ds')).dropna()
             X = ml_df[['trend'] + available_seasonal_components + selected_regressors]; y = ml_df['y']
-            train_size = int(len(X) * 0.85); X_train, X_test, y_train, y_test = X.iloc[:train_size], X.iloc[train_size:], y.iloc[:train_size], y.iloc[train_size:]
-            xgb_model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=1000, learning_rate=0.01, early_stopping_rounds=50); xgb_model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
-            y_pred_xgb = xgb_model.predict(X_test); r2, rmse = r2_score(y_test, y_pred_xgb), np.sqrt(mean_squared_error(y_test, y_pred_xgb))
-            st.metric("XGBoost Test R² Score", f"{r2:.3f}"); st.metric("XGBoost Test RMSE", f"{rmse:.3f}")
-            fig_xgb = go.Figure(); fig_xgb.add_trace(go.Scatter(x=y_train.index, y=y_train, name='Train')); fig_xgb.add_trace(go.Scatter(x=y_test.index, y=y_test, name='Test (Actual)')); fig_xgb.add_trace(go.Scatter(x=y_test.index, y=y_pred_xgb, name='XGBoost Prediction'))
+            train_size = int(len(X) * 0.85)
+            X_train, X_test, y_train, y_test = X.iloc[:train_size], X.iloc[train_size:], y.iloc[:train_size], y.iloc[train_size:]
+            xgb_model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=1000, learning_rate=0.01, early_stopping_rounds=50)
+            xgb_model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
+            y_pred_xgb = xgb_model.predict(X_test)
+            r2, rmse = r2_score(y_test, y_pred_xgb), np.sqrt(mean_squared_error(y_test, y_pred_xgb))
+            st.metric("XGBoost Test R² Score", f"{r2:.3f}")
+            st.metric("XGBoost Test RMSE", f"{rmse:.3f}")
+            fig_xgb = go.Figure()
+            fig_xgb.add_trace(go.Scatter(x=y_train.index, y=y_train, name='Train'))
+            fig_xgb.add_trace(go.Scatter(x=y_test.index, y=y_test, name='Test (Actual)'))
+            fig_xgb.add_trace(go.Scatter(x=y_test.index, y=y_pred_xgb, name='XGBoost Prediction'))
             st.plotly_chart(fig_xgb, use_container_width=True)
             feature_imp = pd.DataFrame(sorted(zip(xgb_model.feature_importances_, X.columns)), columns=['Value','Feature'])
             st.plotly_chart(px.bar(feature_imp, x="Value", y="Feature", orientation='h', title="Feature Importance"), use_container_width=True)
-            with st.expander("🔍 XGBoost 종합 결과 해석"): st.markdown(guide_content.split("`R² Score`")[1])
+            with st.expander("🔍 XGBoost 종합 결과 해석"):
+                st.markdown(guide_content.split("`R² Score`")[1])
 
-    
     with tab3:
         st.header("통합 데이터 (주별)")
         st.dataframe(final_df)
