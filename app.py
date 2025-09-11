@@ -48,6 +48,8 @@ st.title("📊 통합 데이터 기반 탐색 및 예측 대시보드")
 
 BQ_DATASET = "data_explorer"
 BQ_TABLE_TRADE = "tds_data"
+BQ_TABLE_NAVER = "naver_trends_cache"
+BQ_TABLE_NEWS = "news_sentiment_finbert"
 
 COMMODITY_TICKERS = {
     "Coffee": "KC=F", "Cocoa": "CC=F", "Orange Juice": "OJ=F",
@@ -262,13 +264,32 @@ def get_trade_data_from_bq(client, categories):
 
 @st.cache_data(ttl=3600)
 def fetch_yfinance_data(ticker_name, ticker_symbol, start_date, end_date):
-    try:
-        data = yf.download(ticker_symbol, start=start_date, end=end_date, progress=False)
-        if data.empty: return pd.DataFrame()
-        df = data[['Close']].rename(columns={'Close': f'Futures_{ticker_name}'})
-        df.index.name = '날짜'
-        return df
-    except Exception as e: st.sidebar.error(f"Yahoo Finance 데이터 로드 중 오류: {e}"); return pd.DataFrame()
+    data_frames = []
+    current_start = start_date
+    while current_start < end_date:
+        # Fetch data in 2-year chunks for robustness
+        current_end = current_start + timedelta(days=365 * 2)
+        if current_end > end_date:
+            current_end = end_date
+        
+        try:
+            data = yf.download(ticker_symbol, start=current_start, end=current_end, progress=False)
+            if not data.empty:
+                data_frames.append(data)
+        except Exception as e:
+            st.sidebar.error(f"Yahoo Finance 데이터 일부 로드 중 오류: {e}")
+            break # Stop if there is a persistent error
+        
+        current_start = current_end + timedelta(days=1)
+
+    if not data_frames:
+        st.sidebar.warning(f"'{ticker_name}'에 대한 선물 데이터를 가져올 수 없습니다. 기간이나 티커를 확인해주세요.")
+        return pd.DataFrame()
+
+    full_data = pd.concat(data_frames)
+    df = full_data[['Close']].rename(columns={'Close': f'Futures_{ticker_name}'})
+    df.index.name = '날짜'
+    return df
 
 @st.cache_data(ttl=3600)
 def fetch_kamis_data(item_info, start_date, end_date, kamis_keys):
@@ -289,10 +310,44 @@ def fetch_kamis_data(item_info, start_date, end_date, kamis_keys):
             return df_new
     except Exception: return pd.DataFrame()
 
+def call_naver_api(url, body, naver_keys):
+    try:
+        request = urllib.request.Request(url)
+        request.add_header("X-Naver-Client-Id", naver_keys['id'])
+        request.add_header("X-Naver-Client-Secret", naver_keys['secret'])
+        request.add_header("Content-Type", "application/json")
+        response = urllib.request.urlopen(request, data=body.encode("utf-8"))
+        if response.getcode() == 200:
+            return json.loads(response.read().decode('utf-8'))
+        return None
+    except Exception as e:
+        st.error(f"Naver API 오류 발생: {e}")
+        return None
+
 @st.cache_data(ttl=3600)
-def fetch_naver_trends_data(keywords, start_date, end_date, naver_keys):
-    st.sidebar.warning("Naver API 연동은 현재 비활성화 상태입니다. (Placeholder)")
-    return pd.DataFrame()
+def fetch_naver_trends_data(_client, keywords, start_date, end_date, naver_keys):
+    if not naver_keys.get('id') or not naver_keys.get('secret'):
+        return pd.DataFrame()
+
+    all_data = []
+    for keyword in keywords:
+        body = json.dumps({
+            "startDate": start_date.strftime('%Y-%m-%d'),
+            "endDate": end_date.strftime('%Y-%m-%d'),
+            "timeUnit": "date",
+            "keywordGroups": [{"groupName": keyword, "keywords": [keyword]}]
+        })
+        response = call_naver_api("https://openapi.naver.com/v1/datalab/search", body, naver_keys)
+        if response and response.get('results'):
+            data = response['results'][0]['data']
+            if data:
+                df_keyword = pd.DataFrame(data).rename(columns={'period': '날짜', 'ratio': f'Naver_{keyword}'})
+                df_keyword['날짜'] = pd.to_datetime(df_keyword['날짜'])
+                all_data.append(df_keyword)
+
+    if not all_data: return pd.DataFrame()
+    return reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), all_data)
+
 
 @st.cache_data
 def find_best_prophet_params(_df, _regressors):
@@ -361,7 +416,7 @@ if st.sidebar.button("🚀 모든 데이터 통합 및 분석 실행"):
         
         naver_keys = {'id': naver_client_id, 'secret': naver_client_secret}
         naver_keywords = [k.strip() for k in naver_keywords_input.split(',') if k.strip()]
-        naver_df = fetch_naver_trends_data(naver_keywords, start_date, end_date, naver_keys) if naver_keywords and naver_client_id else pd.DataFrame()
+        naver_df = fetch_naver_trends_data(bq_client, naver_keywords, start_date, end_date, naver_keys)
         
         external_price_df = pd.DataFrame()
         if price_source == "KAMIS 국내 도매가격":
