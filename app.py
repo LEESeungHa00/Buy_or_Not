@@ -20,7 +20,7 @@ from prophet.diagnostics import cross_validation, performance_metrics
 from kamis_data import KAMIS_FULL_DATA
 import yfinance as yf
 import itertools
-import time 
+import time
 
 # Advanced Analysis Libraries
 from scipy.stats import pearsonr, spearmanr
@@ -263,47 +263,22 @@ def get_trade_data_from_bq(client, categories):
         return df
     except Exception as e: st.error(f"BigQuery TDS 데이터 로드 오류: {e}"); return pd.DataFrame()
 
-def fetch_yfinance_data(ticker: str, start_date: datetime, end_date: datetime, interval: str = "1d") -> pd.DataFrame:
+# ✅ [수정됨] yfinance 라이브러리를 사용하여 안정적으로 데이터 호출
+@st.cache_data(ttl=3600)
+def fetch_yfinance_data(ticker: str, start_date: datetime, end_date: datetime) -> pd.DataFrame:
     """
-    Yahoo Finance REST API를 직접 호출해서 시세 데이터 가져오기
-    - ticker: "KC=F" 같은 심볼
-    - start_date, end_date: datetime
-    - interval: "1d", "1wk", "1mo"
+    yfinance 라이브러리를 사용해 선물 가격 데이터 가져오기
     """
-    # datetime → timestamp(초)
-    start_ts = int(start_date.timestamp())
-    end_ts = int(end_date.timestamp())
+    try:
+        df = yf.download(ticker, start=start_date, end=end_date, progress=False)
+        if df.empty:
+            st.warning(f"'{ticker}'에 대한 데이터를 Yahoo Finance에서 가져올 수 없습니다.")
+            return pd.DataFrame()
+        return df
+    except Exception as e:
+        st.error(f"Yahoo Finance 데이터 다운로드 중 오류 발생: {e}")
+        return pd.DataFrame()
 
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-    params = {
-        "period1": start_ts,
-        "period2": end_ts,
-        "interval": interval,
-        "events": "history",
-    }
-
-    r = requests.get(url, params=params)
-    r.raise_for_status()
-    data = r.json()
-
-    if "chart" not in data or "result" not in data["chart"] or data["chart"]["result"] is None:
-        raise ValueError(f"{ticker} 데이터를 가져올 수 없습니다.")
-
-    result = data["chart"]["result"][0]
-    timestamps = result.get("timestamp", [])
-    indicators = result["indicators"]["quote"][0]
-
-    # DataFrame 변환
-    df = pd.DataFrame(indicators)
-    if len(timestamps) > 0:
-        df["Date"] = pd.to_datetime(timestamps, unit="s")
-        df = df.set_index("Date")
-
-    # NaN 제거 (휴장일, 거래 없음 등)
-    df = df.dropna(how="any")
-
-    return df
-    
 @st.cache_data(ttl=3600)
 def fetch_kamis_data(item_info, start_date, end_date, kamis_keys):
     start_str, end_str = start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')
@@ -431,7 +406,12 @@ if st.sidebar.button("🚀 모든 데이터 통합 및 분석 실행"):
         else:
             if selected_commodity:
                 ticker = COMMODITY_TICKERS[selected_commodity]
-                external_price_df = fetch_yfinance_data(selected_commodity, ticker, start_date, end_date)
+                # ✅ [수정됨] yfinance 함수 호출 및 결과 처리
+                yf_df = fetch_yfinance_data(ticker, start_date, end_date)
+                if not yf_df.empty:
+                    # 종가('Close')를 선택하고, 다른 데이터와 구별되도록 컬럼명 변경
+                    external_price_df = yf_df[['Close']].rename(columns={'Close': f'Futures_{selected_commodity}_Close'})
+
         trade_weekly = trade_df.set_index('Date').resample('W-Mon').agg(수입액_USD=('Value', 'sum'), 수입량_KG=('Volume', 'sum')).copy()
         trade_weekly['수입단가_USD_KG'] = trade_weekly['수입액_USD'] / trade_weekly['수입량_KG']
         dfs_to_merge = [trade_weekly]
@@ -442,10 +422,12 @@ if st.sidebar.button("🚀 모든 데이터 통합 및 분석 실행"):
             naver_df['날짜'] = pd.to_datetime(naver_df['날짜'])
             dfs_to_merge.append(naver_df.set_index('날짜').resample('W-Mon').mean())
         if not external_price_df.empty:
-            if '날짜' in external_price_df.columns:
+             # ✅ [수정됨] yfinance 데이터는 이미 DatetimeIndex를 가지고 있으므로 바로 통합
+            if '날짜' in external_price_df.columns: # KAMIS 데이터 처리용
                 external_price_df['날짜'] = pd.to_datetime(external_price_df['날짜'])
                 external_price_df = external_price_df.set_index('날짜')
             dfs_to_merge.append(external_price_df.resample('W-Mon').mean())
+
         final_df = reduce(lambda left, right: pd.merge(left, right, left_index=True, right_index=True, how='outer'), dfs_to_merge)
         final_df = final_df.interpolate(method='time').fillna(method='bfill').fillna(method='ffill')
         st.session_state.final_df = final_df.replace([np.inf, -np.inf], np.nan).dropna()
@@ -550,4 +532,3 @@ if not st.session_state.final_df.empty:
         st.markdown(guide_content, unsafe_allow_html=True)
 else:
     st.info("👈 사이드바에서 분석할 데이터를 선택하고 '모든 데이터 통합 및 분석 실행' 버튼을 눌러주세요.")
-
