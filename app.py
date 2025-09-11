@@ -263,7 +263,6 @@ def get_trade_data_from_bq(client, categories):
         return df
     except Exception as e: st.error(f"BigQuery TDS 데이터 로드 오류: {e}"); return pd.DataFrame()
 
-# ✅ [수정됨] yfinance 라이브러리를 사용하여 안정적으로 데이터 호출
 @st.cache_data(ttl=3600)
 def fetch_yfinance_data(ticker: str, start_date: datetime, end_date: datetime) -> pd.DataFrame:
     """
@@ -406,10 +405,8 @@ if st.sidebar.button("🚀 모든 데이터 통합 및 분석 실행"):
         else:
             if selected_commodity:
                 ticker = COMMODITY_TICKERS[selected_commodity]
-                # ✅ [수정됨] yfinance 함수 호출 및 결과 처리
                 yf_df = fetch_yfinance_data(ticker, start_date, end_date)
                 if not yf_df.empty:
-                    # 종가('Close')를 선택하고, 다른 데이터와 구별되도록 컬럼명 변경
                     external_price_df = yf_df[['Close']].rename(columns={'Close': f'Futures_{selected_commodity}_Close'})
 
         trade_weekly = trade_df.set_index('Date').resample('W-Mon').agg(수입액_USD=('Value', 'sum'), 수입량_KG=('Volume', 'sum')).copy()
@@ -422,15 +419,19 @@ if st.sidebar.button("🚀 모든 데이터 통합 및 분석 실행"):
             naver_df['날짜'] = pd.to_datetime(naver_df['날짜'])
             dfs_to_merge.append(naver_df.set_index('날짜').resample('W-Mon').mean())
         if not external_price_df.empty:
-             # ✅ [수정됨] yfinance 데이터는 이미 DatetimeIndex를 가지고 있으므로 바로 통합
-            if '날짜' in external_price_df.columns: # KAMIS 데이터 처리용
+            if '날짜' in external_price_df.columns:
                 external_price_df['날짜'] = pd.to_datetime(external_price_df['날짜'])
                 external_price_df = external_price_df.set_index('날짜')
             dfs_to_merge.append(external_price_df.resample('W-Mon').mean())
 
         final_df = reduce(lambda left, right: pd.merge(left, right, left_index=True, right_index=True, how='outer'), dfs_to_merge)
-        final_df = final_df.interpolate(method='time').fillna(method='bfill').fillna(method='ffill')
-        st.session_state.final_df = final_df.replace([np.inf, -np.inf], np.nan).dropna()
+        
+        # ✅ [수정됨] 시계열 예측을 위해 비어있는 값을 보간(interpolate)하고, 미래(bfill)와 과거(ffill) 값으로 채웁니다.
+        # 이 방식은 데이터의 연속성을 보장하여 Prophet 모델의 성능을 안정화시킵니다.
+        final_df = final_df.interpolate(method='time').bfill().ffill()
+        final_df = final_df.replace([np.inf, -np.inf], np.nan).dropna()
+
+        st.session_state.final_df = final_df
         st.session_state.best_params = {}
         st.success("데이터 통합 완료!")
 
@@ -491,7 +492,7 @@ if not st.session_state.final_df.empty:
             for reg in selected_regressors: m.add_regressor(reg)
             m.fit(prophet_df[['ds', 'y'] + selected_regressors])
             future = m.make_future_dataframe(periods=forecast_periods, freq='W')
-            future_regressors = prophet_df[['ds'] + selected_regressors].set_index('ds'); last_values = future_regressors.iloc[-1]; future_regressors = future_regressors.reindex(future['ds']).fillna(method='ffill').fillna(last_values); future = pd.concat([future.set_index('ds'), future_regressors], axis=1).reset_index()
+            future_regressors = prophet_df[['ds'] + selected_regressors].set_index('ds'); last_values = future_regressors.iloc[-1]; future_regressors = future_regressors.reindex(future['ds']).ffill().bfill(); future = pd.concat([future.set_index('ds'), future_regressors], axis=1).reset_index()
             forecast = m.predict(future)
             st.subheader("Prophet 예측 결과"); st.plotly_chart(plot_plotly(m, forecast), use_container_width=True)
             st.subheader("Prophet 요인 분해"); st.plotly_chart(plot_components_plotly(m, forecast), use_container_width=True)
