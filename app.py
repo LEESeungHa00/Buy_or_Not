@@ -271,9 +271,10 @@ def fetch_yfinance_data(ticker_name, ticker_symbol, start_date, end_date):
         if current_end > end_date: current_end = end_date
         try:
             data = yf.download(ticker_symbol, start=current_start, end=current_end, progress=False)
-            if not data.empty: data_frames.append(data)
+            if not data.empty:
+                data_frames.append(data)
         except Exception as e:
-            st.sidebar.error(f"Yahoo Finance 데이터 일부 로드 중 오류: {e}")
+            st.sidebar.error(f"'{current_start.date()}'~'{current_end.date()}' 구간 데이터 로드 중 오류: {e}")
         current_start = current_end + timedelta(days=1)
     if not data_frames:
         st.sidebar.warning(f"'{ticker_name}'에 대한 선물 데이터를 가져올 수 없습니다. 기간이나 티커를 확인해주세요.")
