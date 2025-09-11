@@ -267,25 +267,17 @@ def fetch_yfinance_data(ticker_name, ticker_symbol, start_date, end_date):
     data_frames = []
     current_start = start_date
     while current_start < end_date:
-        # Fetch data in 2-year chunks for robustness
         current_end = current_start + timedelta(days=365 * 2)
-        if current_end > end_date:
-            current_end = end_date
-        
+        if current_end > end_date: current_end = end_date
         try:
             data = yf.download(ticker_symbol, start=current_start, end=current_end, progress=False)
-            if not data.empty:
-                data_frames.append(data)
+            if not data.empty: data_frames.append(data)
         except Exception as e:
             st.sidebar.error(f"Yahoo Finance 데이터 일부 로드 중 오류: {e}")
-            break # Stop if there is a persistent error
-        
         current_start = current_end + timedelta(days=1)
-
     if not data_frames:
         st.sidebar.warning(f"'{ticker_name}'에 대한 선물 데이터를 가져올 수 없습니다. 기간이나 티커를 확인해주세요.")
         return pd.DataFrame()
-
     full_data = pd.concat(data_frames)
     df = full_data[['Close']].rename(columns={'Close': f'Futures_{ticker_name}'})
     df.index.name = '날짜'
@@ -321,21 +313,17 @@ def call_naver_api(url, body, naver_keys):
             return json.loads(response.read().decode('utf-8'))
         return None
     except Exception as e:
-        st.error(f"Naver API 오류 발생: {e}")
+        st.sidebar.error(f"Naver API 오류 발생: {e}")
         return None
 
 @st.cache_data(ttl=3600)
 def fetch_naver_trends_data(_client, keywords, start_date, end_date, naver_keys):
-    if not naver_keys.get('id') or not naver_keys.get('secret'):
-        return pd.DataFrame()
-
+    if not naver_keys.get('id') or not naver_keys.get('secret'): return pd.DataFrame()
     all_data = []
     for keyword in keywords:
         body = json.dumps({
-            "startDate": start_date.strftime('%Y-%m-%d'),
-            "endDate": end_date.strftime('%Y-%m-%d'),
-            "timeUnit": "date",
-            "keywordGroups": [{"groupName": keyword, "keywords": [keyword]}]
+            "startDate": start_date.strftime('%Y-%m-%d'), "endDate": end_date.strftime('%Y-%m-%d'),
+            "timeUnit": "date", "keywordGroups": [{"groupName": keyword, "keywords": [keyword]}]
         })
         response = call_naver_api("https://openapi.naver.com/v1/datalab/search", body, naver_keys)
         if response and response.get('results'):
@@ -344,10 +332,10 @@ def fetch_naver_trends_data(_client, keywords, start_date, end_date, naver_keys)
                 df_keyword = pd.DataFrame(data).rename(columns={'period': '날짜', 'ratio': f'Naver_{keyword}'})
                 df_keyword['날짜'] = pd.to_datetime(df_keyword['날짜'])
                 all_data.append(df_keyword)
-
-    if not all_data: return pd.DataFrame()
-    return reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), all_data)
-
+    if not all_data:
+        st.sidebar.warning(f"Naver Trends에서 '{','.join(keywords)}' 데이터를 찾을 수 없습니다.")
+        return pd.DataFrame()
+    return reduce(lambda left, right: pd.merge(left, right, on='날짜', how='outer'), all_data) if len(all_data) > 1 else all_data[0]
 
 @st.cache_data
 def find_best_prophet_params(_df, _regressors):
@@ -362,7 +350,6 @@ def find_best_prophet_params(_df, _regressors):
     period_days = str(int(len(_df) * 0.2)) + ' days'
     horizon_days = str(int(len(_df) * 0.2)) + ' days'
     if int(len(_df) * 0.2) < 30 : return all_params[1]
-
     for params in all_params:
         try:
             m = Prophet(**params)
@@ -371,8 +358,7 @@ def find_best_prophet_params(_df, _regressors):
             df_cv = cross_validation(m, initial=initial_days, period=period_days, horizon=horizon_days, parallel="processes")
             df_p = performance_metrics(df_cv, rolling_window=1)
             rmses.append(df_p['rmse'].values[0])
-        except Exception:
-            rmses.append(float('inf'))
+        except Exception: rmses.append(float('inf'))
     best_params = all_params[np.argmin(rmses)]
     return best_params
 
@@ -394,13 +380,11 @@ start_date = pd.to_datetime(st.sidebar.date_input('시작일', datetime(2022, 1,
 end_date = pd.to_datetime(st.sidebar.date_input('종료일', datetime.now()))
 news_keyword_input = st.sidebar.text_input("뉴스 분석 키워드", selected_categories[0] if selected_categories else "")
 naver_keywords_input = st.sidebar.text_input("네이버 트렌드 키워드 (쉼표 구분)", selected_categories[0] if selected_categories else "")
-
 with st.sidebar.expander("🔑 API 키 입력 (선택)"):
     naver_client_id = st.text_input("Naver API Client ID", type="password")
     naver_client_secret = st.text_input("Naver API Client Secret", type="password")
     kamis_api_key = st.text_input("KAMIS API Key", type="password")
     kamis_api_id = st.text_input("KAMIS API ID", type="password")
-
 st.sidebar.subheader("🌍 외부 가격 데이터 소스")
 price_source = st.sidebar.radio("가격 소스 선택", ["KAMIS 국내 도매가격", "Yahoo Finance 선물 가격"])
 if price_source == "KAMIS 국내 도매가격":
@@ -413,11 +397,9 @@ if st.sidebar.button("🚀 모든 데이터 통합 및 분석 실행"):
         trade_df = get_trade_data_from_bq(bq_client, selected_categories)
         news_df = get_news_with_multi_model_analysis(bq_client, models, news_keyword_input)
         st.session_state.raw_news_df = news_df
-        
         naver_keys = {'id': naver_client_id, 'secret': naver_client_secret}
         naver_keywords = [k.strip() for k in naver_keywords_input.split(',') if k.strip()]
         naver_df = fetch_naver_trends_data(bq_client, naver_keywords, start_date, end_date, naver_keys)
-        
         external_price_df = pd.DataFrame()
         if price_source == "KAMIS 국내 도매가격":
             if kamis_item_name and kamis_kind_name and kamis_api_key and kamis_api_id:
@@ -429,11 +411,9 @@ if st.sidebar.button("🚀 모든 데이터 통합 및 분석 실행"):
             if selected_commodity:
                 ticker = COMMODITY_TICKERS[selected_commodity]
                 external_price_df = fetch_yfinance_data(selected_commodity, ticker, start_date, end_date)
-        
         trade_weekly = trade_df.set_index('Date').resample('W-Mon').agg(수입액_USD=('Value', 'sum'), 수입량_KG=('Volume', 'sum')).copy()
         trade_weekly['수입단가_USD_KG'] = trade_weekly['수입액_USD'] / trade_weekly['수입량_KG']
         dfs_to_merge = [trade_weekly]
-        
         if not news_df.empty:
             news_df['날짜'] = pd.to_datetime(news_df['날짜'])
             dfs_to_merge.append(news_df.drop(columns=['Title']).set_index('날짜').resample('W-Mon').mean())
@@ -445,7 +425,6 @@ if st.sidebar.button("🚀 모든 데이터 통합 및 분석 실행"):
                 external_price_df['날짜'] = pd.to_datetime(external_price_df['날짜'])
                 external_price_df = external_price_df.set_index('날짜')
             dfs_to_merge.append(external_price_df.resample('W-Mon').mean())
-        
         final_df = reduce(lambda left, right: pd.merge(left, right, left_index=True, right_index=True, how='outer'), dfs_to_merge)
         final_df = final_df.interpolate(method='time').fillna(method='bfill').fillna(method='ffill')
         st.session_state.final_df = final_df.replace([np.inf, -np.inf], np.nan).dropna()
@@ -455,21 +434,17 @@ if st.sidebar.button("🚀 모든 데이터 통합 및 분석 실행"):
 if not st.session_state.final_df.empty:
     final_df = st.session_state.final_df
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 상관관계 분석", "📈 시계열 예측", "📄 통합 데이터", "📰 수집 뉴스 원본", "📘 대시보드 사용법"])
-    
     with tab1:
         st.header("상관관계 분석")
         col1, col2 = st.columns(2)
         corr_method = col1.selectbox("상관관계 분석 방법", ('pearson', 'spearman'), key="corr_method")
         pval_threshold = col2.slider("유의수준 (P-value) 필터", 0.0, 1.0, 0.05, key="pval_slider")
         corr_matrix, pval_matrix = calculate_advanced_correlation(final_df, method=corr_method)
-        
         st.subheader(f"'{corr_method.capitalize()}' 상관관계 히트맵")
         fig_heatmap = go.Figure(data=go.Heatmap(z=corr_matrix.values, x=corr_matrix.columns, y=corr_matrix.columns, colorscale='RdBu_r', zmin=-1, zmax=1, text=corr_matrix.round(2).astype(str), texttemplate="%{text}"))
         st.plotly_chart(fig_heatmap, use_container_width=True)
-        
         with st.expander("🔍 히트맵 결과 해석하기"):
             st.markdown(interpret_correlation(corr_matrix, pval_matrix, threshold=pval_threshold))
-        
         st.markdown("---")
         st.subheader("시차 교차상관 분석")
         driver_cols = st.multiselect("선행 변수 (Driver)", final_df.columns, default=[c for c in final_df if any(kw in c.lower() for kw in ['news', 'naver', '가격', 'futures'])])
@@ -479,7 +454,6 @@ if not st.session_state.final_df.empty:
             st.dataframe(lag_df.head(10))
             if not lag_df.empty:
                 st.info(f"가장 강한 시차 관계: **{lag_df.iloc[0]['Driver (X)']}**의 변화는 **{lag_df.iloc[0]['Best Lag (Weeks)']}주 후** **{lag_df.iloc[0]['Outcome (Y)']}**에 영향을 미치는 경향이 있습니다 (상관계수: {lag_df.iloc[0]['Correlation']:.3f}).")
-        
         st.markdown("---")
         st.subheader("산점도 행렬 (Scaled for Visualization)")
         scaler = MinMaxScaler()
@@ -487,7 +461,6 @@ if not st.session_state.final_df.empty:
         dims = st.multiselect("산점도 표시 변수", scaled_df.columns, default=list(scaled_df.columns[:8]))
         if dims:
             st.plotly_chart(px.scatter_matrix(scaled_df[dims]), use_container_width=True)
-
     with tab2:
         st.header("시계열 예측 (Prophet & XGBoost)")
         prophet_df = final_df.reset_index().rename(columns={final_df.index.name if final_df.index.name else 'index': 'ds'})
@@ -497,14 +470,12 @@ if not st.session_state.final_df.empty:
         prophet_df = prophet_df.rename(columns={forecast_col: 'y'})
         regressors = [c for c in prophet_df.columns if c not in ['ds', 'y']]
         selected_regressors = st.multiselect("외부 예측 변수 (Regressors)", regressors, default=regressors, key="regressors")
-        
         st.subheader("Prophet 모델 파라미터 튜닝")
         if st.button("🤖 최적 파라미터 자동 탐색"):
             with st.spinner("교차 검증을 통해 최적의 파라미터를 탐색 중입니다... (데이터 양에 따라 1~2분 소요될 수 있습니다)"):
                 best_params = find_best_prophet_params(prophet_df[['ds', 'y'] + selected_regressors], selected_regressors)
                 st.session_state.best_params = best_params
                 st.success("최적 파라미터 탐색 완료!")
-        
         bp = st.session_state.best_params
         p_col1, p_col2, p_col3 = st.columns(3)
         changepoint_prior_scale = p_col1.slider("Trend 유연성", 0.01, 0.5, bp.get('changepoint_prior_scale', 0.05), key="cps")
@@ -512,80 +483,50 @@ if not st.session_state.final_df.empty:
         seasonality_mode_options = ['additive', 'multiplicative']
         seasonality_mode_index = seasonality_mode_options.index(bp.get('seasonality_mode', 'additive'))
         seasonality_mode = p_col3.selectbox("계절성 모드", seasonality_mode_options, index=seasonality_mode_index, key="sm")
-        
         if st.button("🚀 예측 실행", key="run_forecast"):
             m = Prophet(changepoint_prior_scale=changepoint_prior_scale, seasonality_prior_scale=seasonality_prior_scale, seasonality_mode=seasonality_mode)
             for reg in selected_regressors: m.add_regressor(reg)
             m.fit(prophet_df[['ds', 'y'] + selected_regressors])
             future = m.make_future_dataframe(periods=forecast_periods, freq='W')
-            future_regressors = prophet_df[['ds'] + selected_regressors].set_index('ds')
-            last_values = future_regressors.iloc[-1]
-            future_regressors = future_regressors.reindex(future['ds']).fillna(method='ffill').fillna(last_values)
-            future = pd.concat([future.set_index('ds'), future_regressors], axis=1).reset_index()
+            future_regressors = prophet_df[['ds'] + selected_regressors].set_index('ds'); last_values = future_regressors.iloc[-1]; future_regressors = future_regressors.reindex(future['ds']).fillna(method='ffill').fillna(last_values); future = pd.concat([future.set_index('ds'), future_regressors], axis=1).reset_index()
             forecast = m.predict(future)
-            st.subheader("Prophet 예측 결과")
-            st.plotly_chart(plot_plotly(m, forecast), use_container_width=True)
-            st.subheader("Prophet 요인 분해")
-            st.plotly_chart(plot_components_plotly(m, forecast), use_container_width=True)
-            st.markdown("---")
-            st.subheader("모델 진단: 잔차 분석")
-            df_pred = forecast.set_index('ds')[['yhat']].join(prophet_df.set_index('ds')[['y']]).dropna()
-            residuals = df_pred['y'] - df_pred['yhat']
+            st.subheader("Prophet 예측 결과"); st.plotly_chart(plot_plotly(m, forecast), use_container_width=True)
+            st.subheader("Prophet 요인 분해"); st.plotly_chart(plot_components_plotly(m, forecast), use_container_width=True)
+            st.markdown("---"); st.subheader("모델 진단: 잔차 분석")
+            df_pred = forecast.set_index('ds')[['yhat']].join(prophet_df.set_index('ds')[['y']]).dropna(); residuals = df_pred['y'] - df_pred['yhat']
             diag_col1, diag_col2 = st.columns(2)
             with diag_col1:
-                st.markdown("**잔차 정상성 검정 (ADF Test)**")
-                adf_result = adfuller(residuals)
-                st.write(f"p-value: {adf_result[1]:.4f}")
+                st.markdown("**잔차 정상성 검정 (ADF Test)**"); adf_result = adfuller(residuals); st.write(f"p-value: {adf_result[1]:.4f}")
             with diag_col2:
-                st.markdown("**잔차 분포**")
-                st.plotly_chart(ff.create_distplot([residuals], ['residuals'], bin_size=.2, show_rug=False), use_container_width=True)
-            st.markdown("---")
-            st.subheader("고급 예측: XGBoost Meta-Forecasting")
-            ml_df = forecast[['ds', 'trend']].set_index('ds')
-            available_seasonal_components = []
+                st.markdown("**잔차 분포**"); st.plotly_chart(ff.create_distplot([residuals], ['residuals'], bin_size=.2, show_rug=False), use_container_width=True)
+            st.markdown("---"); st.subheader("고급 예측: XGBoost Meta-Forecasting")
+            ml_df = forecast[['ds', 'trend']].set_index('ds'); available_seasonal_components = []
             if 'yearly' in forecast.columns: ml_df = ml_df.join(forecast[['ds', 'yearly']].set_index('ds')); available_seasonal_components.append('yearly')
             if 'weekly' in forecast.columns: ml_df = ml_df.join(forecast[['ds', 'weekly']].set_index('ds')); available_seasonal_components.append('weekly')
             ml_df = ml_df.join(prophet_df.set_index('ds')).dropna()
             X = ml_df[['trend'] + available_seasonal_components + selected_regressors]; y = ml_df['y']
-            train_size = int(len(X) * 0.85)
-            X_train, X_test, y_train, y_test = X.iloc[:train_size], X.iloc[train_size:], y.iloc[:train_size], y.iloc[train_size:]
-            xgb_model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=1000, learning_rate=0.01, early_stopping_rounds=50)
-            xgb_model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
-            y_pred_xgb = xgb_model.predict(X_test)
-            r2, rmse = r2_score(y_test, y_pred_xgb), np.sqrt(mean_squared_error(y_test, y_pred_xgb))
-            st.metric("XGBoost Test R² Score", f"{r2:.3f}")
-            st.metric("XGBoost Test RMSE", f"{rmse:.3f}")
-            fig_xgb = go.Figure()
-            fig_xgb.add_trace(go.Scatter(x=y_train.index, y=y_train, name='Train'))
-            fig_xgb.add_trace(go.Scatter(x=y_test.index, y=y_test, name='Test (Actual)'))
-            fig_xgb.add_trace(go.Scatter(x=y_test.index, y=y_pred_xgb, name='XGBoost Prediction'))
+            train_size = int(len(X) * 0.85); X_train, X_test, y_train, y_test = X.iloc[:train_size], X.iloc[train_size:], y.iloc[:train_size], y.iloc[train_size:]
+            xgb_model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=1000, learning_rate=0.01, early_stopping_rounds=50); xgb_model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
+            y_pred_xgb = xgb_model.predict(X_test); r2, rmse = r2_score(y_test, y_pred_xgb), np.sqrt(mean_squared_error(y_test, y_pred_xgb))
+            st.metric("XGBoost Test R² Score", f"{r2:.3f}"); st.metric("XGBoost Test RMSE", f"{rmse:.3f}")
+            fig_xgb = go.Figure(); fig_xgb.add_trace(go.Scatter(x=y_train.index, y=y_train, name='Train')); fig_xgb.add_trace(go.Scatter(x=y_test.index, y=y_test, name='Test (Actual)')); fig_xgb.add_trace(go.Scatter(x=y_test.index, y=y_pred_xgb, name='XGBoost Prediction'))
             st.plotly_chart(fig_xgb, use_container_width=True)
             feature_imp = pd.DataFrame(sorted(zip(xgb_model.feature_importances_, X.columns)), columns=['Value','Feature'])
             st.plotly_chart(px.bar(feature_imp, x="Value", y="Feature", orientation='h', title="Feature Importance"), use_container_width=True)
-            with st.expander("🔍 XGBoost 종합 결과 해석"):
-                st.markdown(guide_content.split("`R² Score`")[1])
-
+            with st.expander("🔍 XGBoost 종합 결과 해석"): st.markdown(guide_content.split("`R² Score`")[1])
     with tab3:
         st.header("통합 데이터 (주별)")
         st.dataframe(final_df)
-        st.download_button(
-            label="CSV로 다운로드",
-            data=final_df.to_csv(index=False).encode('utf-8-sig'),
-            file_name="integrated_weekly_data.csv",
-            mime='text/csv',
-        )
-    
+        st.download_button(label="CSV로 다운로드", data=final_df.to_csv(index=False).encode('utf-8-sig'), file_name="integrated_weekly_data.csv", mime='text/csv',)
     with tab4:
         st.header("📰 수집 뉴스 원본")
         if not st.session_state.raw_news_df.empty:
             st.dataframe(st.session_state.raw_news_df.sort_values(by='날짜', ascending=False))
         else:
             st.info("사이드바에서 분석을 실행하면 수집된 뉴스 기사 제목과 감성 점수를 여기서 확인할 수 있습니다.")
-    
     with tab5:
         st.header("📘 대시보드 사용법 가이드")
         st.markdown(guide_content, unsafe_allow_html=True)
-
 else:
     st.info("👈 사이드바에서 분석할 데이터를 선택하고 '모든 데이터 통합 및 분석 실행' 버튼을 눌러주세요.")
 
